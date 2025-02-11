@@ -2,8 +2,9 @@
 #### preprocessing stationary data
 
 library(dplyr)
+library(lubridate)
 
-o3_files <- paste0("data/aqs/pm/", list.files("data/aqs/pm/"))
+o3_files <- paste0("data/aqs/o3/", list.files("data/aqs/o3/"))
 
 for(i in 1:length(unique(o3_files))) {
   
@@ -16,17 +17,26 @@ for(i in 1:length(unique(o3_files))) {
   
 }
 
-o3_files <- paste0("data/aqs/pm/", list.files("data/aqs/pm/"))
+o3_files <- paste0("data/aqs/o3/", list.files("data/aqs/o3/"))
 
 o3_table <- lapply(o3_files, read.csv, header = TRUE)
 
-head(o3_table[1])
-
 o3.df <- do.call(rbind , o3_table) |>
-  select(c("Time.Local", "Date.Local", "Date.GMT", "Time.GMT", 
-           "Latitude", "Longitude", "Sample.Measurement", "Units.of.Measure"))
+  select(c("Site.Num", "Latitude", "Longitude", "Parameter.Name", 
+           "Date.Local", "Time.Local", # use local time, not GMT (Greenwich Mean Time)
+           "Sample.Measurement", "Units.of.Measure"))
 
-write.csv(o3.df, "data/aqs/aqs_pm.csv", row.names = FALSE)
+names(o3.df) <- tolower(names(o3.df))
+
+o3.df$day_time <- ymd_hm(paste(o3.df$date.local, o3.df$time.local), tz = "UTC")
+# o3.df$day_time <- paste0(gsub(" ", "T", o3.df$day_time), "Z")
+o3.df$date <- ymd(o3.df$date.local)
+o3.df$hour <- hour(o3.df$day_time)
+
+o3.df <- o3.df[, c("site.num", "latitude", "longitude", "parameter.name",
+                   "day_time", "date", "hour", "sample.measurement")]
+
+write.csv(o3.df, "data/aqs/aqs_o3.csv", row.names = FALSE)
 
 #### preprocessing mobile data
 
@@ -81,5 +91,11 @@ ggplot(mobile, aes(x = times, y = O3)) +
   geom_dotplot()
 
 
+mobile <- read.csv("data/mobile/mobile_o3.csv")
 
+mobile_clean <- mobile |>
+  filter(!is.na(O3)) |>
+  filter(O3F == 0)
 
+write.csv(mobile_clean, "data/mobile/mobile_o3_clean2.csv", row.names = FALSE)
+head(mobile_clean)

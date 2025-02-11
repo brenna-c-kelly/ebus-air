@@ -19,6 +19,8 @@ out$date <- ymd_hms(out$date)
 
 table(out$date < "2023-07-10")
 
+aq_df = aq_df[(aq_df.day_time >= "2023-07-07") & (aq_df.day_time <= "2023-07-21")]
+
 # out_date <- out[which(out$date >= "2023-07-13" &
 #                         out$date < "2023-07-14"), ]
 

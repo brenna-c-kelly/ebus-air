@@ -9,7 +9,8 @@ library(RColorBrewer)
 
 #out <- read.csv("/Users/brenna/Documents/School/Research/ebus_air/ebus-air/output/pred_temp_example.csv")
 out <- read.csv("output/pred_pm25_example.csv")
-
+head(out)
+summary(out)
 out$relative_diff <- out$obs / out$pred
 summary(out$relative_diff)
 summary(out$obs)
