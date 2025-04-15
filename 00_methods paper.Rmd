@@ -1,0 +1,279 @@
+---
+title: "00_methods paper"
+author: "Brenna Kelly"
+date: "2025-04-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setup
+
+```{r}
+
+library(sf)
+library(ggplot2)
+library(leaflet)
+library(viridis)
+library(lubridate)
+library(tidyverse)
+library(tidycensus)
+library(colorspace)
+library(RColorBrewer)
+
+```
+
+
+## Read in data
+
+```{r}
+
+o3_files <- paste0("output/o3/", list.files("output/o3/"))
+
+o3_table <- lapply(o3_files, read.csv)
+
+o3_df <- do.call("rbind", o3_table)
+
+```
+
+## pre-preparing
+
+```{r}
+
+# remove 2019
+table(o3_df$date_time >= 2020)
+
+table(o3_df$year == 2019)
+
+```
+
+
+# things we need the full dataset for
+- trends over time (2020-2023)  
+- map of adjustments over all time (mean, median, q0.95)  
+- summary of observations; histograms showing data density/sparsity  
+
+## adjustments over time
+
+```{r}
+
+o3_df$date_time <- ymd_hms(o3_df$date_time)
+
+o3_df$year <- as.factor(
+  year(o3_df$date_time))
+
+###### aside: remove last two weeks of 2019
+o3_df <- o3_df[which(o3_df$year != 2019), ]
+######
+
+o3_df$quarter <- as.factor(
+  quarter(o3_df$date_time))
+
+o3_df$month <- as.factor(
+  month(o3_df$date_time))
+
+
+##### aside: convert to ppm
+o3_df$adj <- o3_df$adj
+
+
+ggplot(o3_df, aes(x = quarter, y = adj, fill = year)) + 
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Dark2") +
+  labs(x = "Year, Season", y = "Adjustment")
+  # facet_wrap(~ year)
+
+
+# have adj changed over time?
+adj_over_time <- group_by(o3_df, year, month) %>%
+  summarise(
+    mean = mean(adj, na.rm = TRUE),
+    sd = sd(adj, na.rm = TRUE)
+  )
+
+plot(adj_over_time$mean)
+
+# with ridges, for more information
+
+library(ggridges)
+ggplot(o3_df, aes(x = adj, y = month,#paste(year, month))
+                    fill = stat(x))) + 
+  geom_density_ridges_gradient(scale = 3, rel_min_height = 0.001) +
+  coord_cartesian(clip = "on") +
+  scale_fill_viridis_c(option = "C")
+  # geom_density_ridges()
+# change axis limits? might show more color variability
+
+ggplot(o3_df, aes(x = adj, y = year, fill = stat(x))) +
+  geom_density_ridges_gradient() +
+  scale_fill_viridis_c(name = "Depth", option = "C") 
+
+
+# probably can't interpret anova when years are not independent
+oneway.test(adj ~ year,
+  data = o3_df,
+  var.equal = FALSE
+)
+
+# has o3 changed over time?
+o3_over_time <- group_by(o3_df, year, month) %>%
+  summarise(
+    mean = mean(yhat, na.rm = TRUE),
+    sd = sd(yhat, na.rm = TRUE)
+  )
+# increase in average and SD
+
+plot(o3_over_time$mean)
+
+
+```
+
+## summary of observations
+
+Count
+
+```{r}
+
+# by year
+grid_sf$year <- year(grid_sf$time_mt)
+
+ggplot(grid_sf, aes(x = year)) +
+  geom_histogram(stat = "count") +
+  labs(x = "Year")
+
+# by month
+grid_sf$month <- month(grid_sf$time_mt)
+grid_sf$month_label <- month(grid_sf$time_mt, label = TRUE)
+
+ggplot(grid_sf, aes(x = month_label)) +
+  geom_histogram(stat = "count") +
+  labs(x = "Month")
+
+# by day of week
+grid_sf$day_of_week <- wday(grid_sf$time)
+grid_sf$day_of_week_label <- wday(grid_sf$time, label = TRUE)
+
+grid_sf$day_type <- ifelse(grid_sf$day_of_week %in% c(1, 7), 
+                           "weekend", "weekday")
+
+ggplot(grid_sf, aes(x = day_of_week_label)) +
+  geom_histogram(stat = "count") +
+  labs(x = "Day of Week")
+
+# by hour of day
+grid_sf$time_mt <- with_tz(grid_sf$time, "America/Denver")
+
+grid_sf$time_of_day <- hour(grid_sf$time_mt)
+
+ggplot(grid_sf, aes(x = time_of_day)) +
+  geom_histogram(bins = 24)
+
+```
+
+
+```{r}
+
+# 0.070 ppm excedance and adjustments
+
+table(o3_df$yhat < 0.07, o3_df$adj > 0)
+
+prop.table(table(o3_df$yhat < 0.07, o3_df$adj > 0))
+# 37.1% of the time, O3 is thought to be below 0.070 AND this is an underestimate
+# 64.4% of the time, O3 is thought to be below 0.070 AND this is an overestimate
+# 0.1% of the time, O3 is thought to be above 0.070 AND this is an underestimate
+# 0.4% of the time, O3 is thought to be above 0.070 AND this is an overestimate
+
+# i.e., in relative terms
+2195511 / 5822
+# a <0.070 underestimate is 377-times more likely than a >0.070 underestimate
+3692038 / 22137
+# a <0.070 overestimate is 167-times more likely than a >0.070 overestimate
+(3692038 + 22137) / (2195511 + 5822)
+# overall, an overestimate is 69% more likely than an underestimate
+
+## note: this does not tell us about the spread, or variability; i.e., how wrong we are; just the direction
+
+
+
+```
+
+
+
+Get SL County geometry, grid cells
+
+```{r}
+
+# slc_cnty = st_read("./data/SLC/Salt_lake.shp")
+
+slc_cnty <- get_acs(geography = "county",
+                    variables = c('B01001_001'),
+                    state = "UT",
+                    geometry = TRUE,
+                    year = 2021) |>
+  filter(NAME == "Salt Lake County, Utah")
+
+fishnet = slc_cnty %>%
+  st_make_grid(cellsize = 0.01, what = "polygons") %>%
+  st_as_sf() %>%
+  rename(geometry = x) %>%
+  mutate(fishnet_id = 1:n()) %>%
+  dplyr::select(fishnet_id, geometry)
+
+```
+
+
+```{r}
+
+# preparing data for spatial join
+dat_sf <- st_as_sf(o3_df, coords = c("lon", "lat"), crs = 4326)
+dat_sf$longitude <- dat$lon
+dat_sf$latitude <- dat$lat
+
+fishnet <- st_transform(fishnet, crs = st_crs(dat_sf))
+
+grid_sf <- st_join(dat_sf, fishnet, join = st_intersects)
+
+# aggregating data to the grid level
+grid_no_geom <- grid_sf |>
+  st_drop_geometry() |>
+  merge(fishnet, by = "fishnet_id") |>
+  group_by(fishnet_id) |>
+  summarize(obs_mean = mean(val, na.rm = TRUE),
+            pred_mean = mean(yhat, na.rm = TRUE),
+            adj_mean = mean(adj, na.rm = TRUE),
+            obs_median = median(val, na.rm = TRUE),
+            pred_median = median(yhat, na.rm = TRUE),
+            adj_median = median(adj, na.rm = TRUE),
+            obs_high = quantile(val, 0.95, na.rm = TRUE),
+            pred_high = quantile(yhat, 0.95, na.rm = TRUE),
+            adj_high = quantile(adj, 0.95, na.rm = TRUE),
+            count = n()) %>%
+  ungroup()
+
+grid_dat <- merge(fishnet, grid_no_geom, by = "fishnet_id")
+
+```
+
+
+# things we don't need the full dataset for  
+- archetypes (year, month, DOW, hour)
+
+
+Display a typical day (y = o3, x = time) for a given grid cell on a weekday in a month in a year
+
+```{r}
+
+ggplot(agg_time_long, aes(x = time, y = value, group = variable)) +
+  geom_line(aes(colour = variable)) +
+  scale_color_manual(values = c("#E7298A", "#e3909c",
+                                "#1B9E77", "#a0be95", 
+                                "#D95F02", "#ecb56a"))
+
+```
+
+
+
+
+
