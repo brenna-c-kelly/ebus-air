@@ -14,14 +14,20 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r}
 
 library(sf)
+library(tmap)
 library(ggplot2)
 library(leaflet)
 library(viridis)
+library(ggridges)
 library(lubridate)
 library(tidyverse)
+library(extrafont)
 library(tidycensus)
 library(colorspace)
+library(data.table)
 library(RColorBrewer)
+
+loadfonts(quiet = T)
 
 ```
 
@@ -30,30 +36,552 @@ library(RColorBrewer)
 
 ```{r}
 
-o3_files <- paste0("output/o3/", list.files("output/o3/"))
-
-o3_table <- lapply(o3_files, read.csv)
-
-o3_df <- do.call("rbind", o3_table)
+# o3_files <- paste0("output/o3/", list.files("output/o3/"))
+# 
+# o3_table <- lapply(o3_files, read.csv)
+# 
+# o3_df <- do.call("rbind", o3_table)
 
 ```
+
+write it / read it:
+
+```{r}
+
+# write.csv(o3_df, "o3_full_period.csv", row.names = FALSE)
+o3_df <- fread("o3_full_period.csv")
+
+```
+
 
 ## pre-preparing
 
 ```{r}
 
-# remove 2019
-table(o3_df$date_time >= 2020)
+o3_df_clean <- o3_df |>
+  filter(date_time >= "2023-01-01" &
+           date_time < "2023-12-31")
 
-table(o3_df$year == 2019)
+summary(o3_df_clean$date_time)
+
+o3_df_clean <- o3_df_clean |>
+  mutate(yhat = yhat * 1000) |>
+  mutate(val = val * 1000) |>
+  mutate(adj = adj * 1000)
+
+## adding characteristics of potential interest
+
+o3_sf <- st_as_sf(o3_df_clean, 
+                  coords = c("lon", "lat"), 
+                  crs = 4326)
 
 ```
 
 
-# things we need the full dataset for
-- trends over time (2020-2023)  
-- map of adjustments over all time (mean, median, q0.95)  
-- summary of observations; histograms showing data density/sparsity  
+# figures and such  
+<!-- - trends over time (2020-2023)   -->
+- summary statistics for ebus and monitors  
+<!-- - summary of observations; histograms showing data density/sparsity   -->
+- histograms  
+- map of adjustments over all time (0.025, median, q0.975; mean just for fun)  
+- a zoomed-in map with a lot of data; points and aggregate? to show level of detail we get  
+- time series for year and a typical (average?) day for each month; to show the diurnal seasonal cycle (and monthly)  
+
+## summary statistics
+
+```{r}
+
+summary(o3_df_clean$adj)
+
+ggplot(o3_df_clean, aes(x = adj)) +
+  geom_histogram(bins = 40, fill = "black") +
+  labs(x = "Adjustment (ppb)", y = "Count", 
+       title = "Distribution of Adjustments",
+       subtitle = "Observed value \u2013 predicted value") +
+  theme_bw(base_family = "Century Gothic")
+
+```
+
+https://cran.r-project.org/web/packages/tableone/vignettes/introduction.html
+
+```{r}
+
+library(tableone) ## maybe don't use table one
+
+# create variables of interest
+o3_df_clean <- o3_df_clean |>
+  mutate(month = month(date_time, label = TRUE)) |>
+  mutate(day_of_week = wday(date_time, week_start = 7, # start week with Sunday
+                            label = TRUE)) |>
+  mutate(hour = hour(date_time)) |>
+  mutate(weekend = ifelse(day_of_week %in% c("Sunday", "Saturday"),
+                          "weekend", "weekday"))
+
+# exceptional events
+# https://aqs.epa.gov/aqsweb/documents/codetables/qualifiers.html
+aqs <- read.csv("data/aqs/o3/hourly_44201_2023.csv")
+table(aqs$Qualifier)
+# Just FYI, MDL = 0.005, or 5; minimum detectable level
+
+aqs <- aqs |>
+  mutate(qualifier_def = as.character(
+    case_when(Qualifier == "5" ~ "outlier",
+              Qualifier == "IF" ~ "fire, canada",
+              Qualifier == "IT" ~ "fire, us"))) |>
+  mutate(date_time = ymd_hm(paste(Date.Local, Time.Local))) |>
+  mutate(date_time = force_tz(date_time, tzone = "MST")) |>
+  mutate(date = ymd(Date.Local)) |>
+  mutate(date = force_tz(date, tzone = "MST"))
+
+exceptions <- as.data.frame(
+  table(aqs$date, aqs$qualifier_def)) |>
+  filter(Freq > 0) |>
+  rename(date = Var1,
+         exception = Var2) |>
+  select(!Freq)
+
+o3_df_clean$date <- as.factor(date(o3_df_clean$date_time))
+
+# merge to add exceptions to o3 data
+o3_df_clean <- merge(o3_df_clean, exceptions, by = "date", all.x = TRUE)
+table(o3_df_clean$exception)
+
+o3_df_clean$exception <- ifelse(is.na(o3_df_clean$exception),
+                                "no exception", as.character(o3_df_clean$exception))
+
+# adjustment
+ggplot(o3_df_clean, aes(x = adj)) +
+  geom_histogram(bins = 40, aes(fill = exception)) +
+  labs(x = "Adjustment (ppb)", y = "Count", 
+       title = "Distribution of Adjustments",
+       subtitle = "Observed value \u2013 predicted value") +
+  theme_bw(base_family = "Century Gothic") +
+  facet_wrap(~ exception, scales = "free_y")
+
+# observed values
+ggplot(o3_df_clean, aes(x = val)) +
+  geom_histogram(bins = 40, aes(fill = exception)) +
+  labs(x = "Adjustment (ppb)", y = "Count", 
+       title = "Distribution of Adjustments",
+       subtitle = "Observed value \u2013 predicted value") +
+  theme_bw(base_family = "Century Gothic") +
+  facet_wrap(~ exception, scales = "free_y")
+
+
+aggregate(o3_df_clean$adj, by = list(o3_df_clean$exception), FUN = mean)
+aggregate(o3_df_clean$adj, by = list(o3_df_clean$exception), FUN = sd)
+# on average, we overestimate O3 more during days without exceptions
+# i.e., mobile O3 is better than expected on fire days and outlier days
+
+# anova
+res_aov <- aov(adj ~ exception, data = o3_df_clean)
+
+hist(res_aov$residuals) # looks normal
+
+summary(res_aov) # adjustments are different across exception
+
+# interestingly, O3 tends to be higher on days without exceptional events
+aggregate(o3_df_clean$val, by = list(o3_df_clean$exception), FUN = median)
+aggregate(o3_df_clean$val, by = list(o3_df_clean$exception), FUN = mean)
+
+
+## just checking that we captured the right dates; apparently we did
+# we meaning, me and my computer
+outlier <- o3_df_clean |>
+  filter(exception == "outlier")
+
+unique(date(outlier$date_time))
+
+outlier_aqs <- aqs |>
+  filter(qualifier_def == "outlier")
+
+unique(date(outlier_aqs$date_time))
+
+?CreateTableOne
+
+
+
+
+summary(o3_df_clean)
+
+
+```
+
+
+## maps of adjustments  
+
+```{r}
+
+```
+
+
+## zoomed-in map with a lot of data, to show resolution
+
+```{r}
+
+```
+
+
+## time series for full year
+
+```{r}
+
+o3_slc
+
+```
+
+
+## daily time series for month
+
+```{r}
+
+o3_slc |>
+  st_drop_geometry() |>
+  group_by(month(date_time), hour(date_time)) |>
+  median_qi(val, yhat, .width = 0.95) |>
+  rename(hour = `hour(date_time)`,
+         month = `month(date_time)`) |>
+  # filter(month == 10) |>
+  ggplot(aes(x = hour, y = val, ymin = val.lower, ymax = val.upper)) +
+  geom_line(colour = "red") +
+  geom_ribbon(aes(fill = "Mobile"), alpha = 0.5) +
+  geom_line(aes(x = hour, y = yhat), colour = "navy") +
+  geom_ribbon(aes(ymin = yhat.lower, ymax = yhat.upper,
+                  fill = "Stationary"),
+              alpha = 0.35) +
+  scale_fill_manual(labels = c("Mobile", "Stationary"), values = c("hotpink", "purple")) +
+  labs(x = "Hour of Day", y = "Adjustment (ppm)",
+       fill = "Data") +
+  facet_wrap(~ month, labeller = labeller(month = m_labels)) +
+  theme_minimal()
+
+```
+
+
+## daily time series for seasons
+
+```{r}
+
+```
+
+
+
+
+# extras  
+- how adjustments change residential exposure  
+    - using landscan global 2023  
+    - using census block groups  
+    
+```{r}
+
+
+
+```
+
+
+```{r}
+
+# get census geometry, population data
+
+v20 <- load_variables(2020, "dhc", cache = TRUE)
+
+View(v20)
+
+slc_cnty <- get_decennial(geography = "block group",
+                          variables = c('H6_001N'),
+                          state = "UT",
+                          geometry = TRUE,
+                          year = 2020,
+                          sumfile = "dhc") |>
+  mutate(county = str_sub(GEOID, start = 0, end = 5)) |>
+  filter(county ==  "49035")
+
+# join adjustments to census block groups
+
+tm_shape(slc_cnty) +
+  tm_polygons(fill = "gray90", col = "white") +
+  tm_shape(o3_sf) +
+  tm_dots(fill_alpha = 0.05, fill = "orangered")
+
+```
+
+
+```{r}
+# join and aggregate
+
+o3_sf <- st_transform(o3_sf, crs = st_crs(slc_cnty))
+
+o3_slc <- st_join(o3_sf, slc_cnty, st_intersects)
+
+# aggregate to block group (0.025, median, 0.975), then join to block group geometry
+
+block_counts <- as.data.frame(table(o3_slc$GEOID))
+
+o3_slc_agg <- aggregate(o3_slc$adj, by = list(o3_slc$GEOID), FUN = quantile,
+                       probs = c(0.025, 0.5, 0.975)) |>
+  mutate(lo_adj = x[, 1]) |>
+  mutate(med_adj = x[, 2]) |>
+  mutate(hi_adj = x[, 3]) |>
+  rename(GEOID = `Group.1`) |>
+  select(!c(x))
+
+o3_slc_agg <- merge(slc_cnty, o3_slc_agg, by = "GEOID", all.x = TRUE)
+
+```
+
+
+```{r}
+# map
+o3_slc_agg_empty <- o3_slc_agg |>
+  filter(is.na(med_adj))
+
+# pop centroids for large areas
+pop <- read.csv("methods paper/data/CenPop2020_Mean_BG49.csv") |>
+  mutate(GEOID = paste0(STATEFP, str_pad(COUNTYFP, pad = "0", 
+                                         width = 3, side = "left"), 
+                        str_pad(TRACTCE, pad = "0", 
+                                width = 6, side = "left"), BLKGRPCE))
+o3_slc_agg$area <- as.numeric(
+  st_area(o3_slc_agg))
+large <- o3_slc_agg |>
+  filter(!is.na(med_adj)) |>
+  filter(area >= 50000000)
+large_pop <- pop[which(pop$GEOID %in% large$GEOID), ] |>
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
+
+# map of median adjustments for 2023, aggregated to block group
+tm_shape(o3_slc_agg) +
+  tm_polygons(fill = "med_adj", style = "cont", 
+              palette = "-spectral", lwd = 0, title = "Median \nAdjustment") +
+  tm_shape(o3_slc_agg_empty) +
+  tm_polygons(fill = "gray90", lwd = 0) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_shape(large_pop) +
+  tm_dots(fill = "gray20") +
+  tm_add_legend(labels = "Population \nCenters",
+                type = "symbols", fill = "gray20",
+                size = 0.25)
+
+# low adjustments
+tm_shape(o3_slc_agg) +
+  tm_polygons(fill = "lo_adj", style = "cont", 
+              palette = "-brewer.spectral", lwd = 0, title = "Q0.025 \nAdjustment") +
+  tm_shape(o3_slc_agg_empty) +
+  tm_polygons(fill = "gray90", lwd = 0) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_shape(large_pop) +
+  tm_dots(fill = "gray20") +
+  tm_add_legend(labels = "Population \nCenters",
+                type = "symbols", fill = "gray20",
+                size = 0.25)
+
+# high adjustments
+tm_shape(o3_slc_agg) +
+  tm_polygons(fill = "hi_adj", style = "cont",# fill_alpha = 0.25, 
+              palette = "-brewer.spectral", lwd = 0, title = "Q97.5 \nAdjustment") +
+  tm_shape(o3_slc_agg_empty) +
+  tm_polygons(fill = "gray90", lwd = 0) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_shape(large_pop) +
+  tm_dots(fill = "gray20") +
+  tm_add_legend(labels = "Population \nCenters",
+                type = "symbols", fill = "gray20",
+                size = 0.25)
+
+tmap_mode(mode = "plot")
+
+```
+
+preliminary investigation
+
+```{r}
+
+tm_shape(o3_slc_agg) +
+  tm_polygons(fill = "value", style = "cont", palette = "viridis", lwd = 0) +
+  tm_layout(frame = FALSE, legend.frame = FALSE)
+
+cor.test(o3_slc_agg$value, o3_slc_agg$med_adj)
+# weak, no correlation
+
+# at a finer resolution; within block groups
+cor.test(o3_slc$adj, o3_slc$value)
+# slight negative correlation between population and adjustment
+# i.e., the air quality tends to be better than we think in areas with higher population
+
+# let's test population density
+o3_slc_agg$pop_density <- o3_slc_agg$value / (o3_slc_agg$area / 1000) # people / sq km
+
+cor.test(o3_slc_agg$pop_density, o3_slc_agg$med_adj)
+# slight negative association, approaches significance
+
+# at a finer resolution with population density
+pop_adj_test <- merge(o3_slc, st_drop_geometry(o3_slc_agg), by = "GEOID")
+
+cor.test(pop_adj_test$pop_density, pop_adj_test$adj)
+# very slight positive correlation; significant but high N
+
+tm_shape(o3_slc_agg) +
+  tm_polygons(fill = "pop_density", style = "cont", palette = "viridis", lwd = 0) +
+  tm_layout(frame = FALSE, legend.frame = FALSE)
+
+
+# sampling observations, weighted by population density
+
+o3_slc_agg_comp <- o3_slc_agg |>
+  filter(!is.na(lo_adj))
+
+set.seed(4178)
+
+nsample = 100
+samp_idx <- sample(seq_len(nrow(o3_slc_agg_comp)), nsample, 
+                   prob = o3_slc_agg_comp$pop_density)
+o3_slc_sample <- o3_slc_agg_comp[samp_idx, ]
+
+
+```
+
+
+
+hypothetical residential exposure profiles
+
+```{r}
+
+# select a random set of block groups, weighted by number of observations (not pop density)
+
+n_obs <- o3_slc |>
+  group_by(GEOID) |>
+  st_drop_geometry() |>
+  count()
+
+# weighting by n obs in a block group
+samp_idx <- sample(seq_len(nrow(n_obs)), 100, 
+                   prob = n_obs$n)
+# getting sampled block groups
+sampled_geoids <- n_obs[samp_idx, "GEOID"]
+# selecting observations in sampled block groups
+o3_slc_sample <- o3_slc[which(o3_slc$GEOID %in% sampled_geoids$GEOID), ]
+
+
+# select just one; to walk through
+case_study <- o3_slc_sample |>
+  filter(GEOID == 490351025012)
+
+# time series
+case_study_long <- rbind(case_study[, c("date_time", "val", "GEOID")] |>
+                           rename(measure = val) |>
+                           mutate(stat = "val"),
+                         case_study[, c("date_time", "yhat", "GEOID")] |>
+                           rename(measure = yhat) |>
+                           mutate(stat = "yhat"))
+
+ggplot(case_study_long, aes(x = date_time, 
+                            y = measure, group = stat,
+                            colour = stat)) +
+  geom_line()
+
+# time series by month
+val_by_month <- aggregate(case_study$val, by = list(hour(case_study$date_time),
+                                    month(case_study$date_time)), FUN = median) #|>
+  # as.data.frame() |>
+  filter(Group.2 == 10) |>
+  ggplot(aes(x = Group.1, y = x)) +
+  geom_line()
+
+yhat_by_month <- aggregate(case_study$yhat, by = list(hour(case_study$date_time),
+                                    month(case_study$date_time)), FUN = median)# |>
+  # as.data.frame() |>
+  filter(Group.2 == 10) |>
+  ggplot(aes(x = Group.1, y = x)) +
+  geom_line()
+  
+  #
+val_by_month <- val_by_month |>
+  filter(Group.2 == 10)
+yhat_by_month <- yhat_by_month |>
+  filter(Group.2 == 10)
+
+ggplot(val_by_month, aes(x = Group.1, y = x)) +
+  geom_line() +
+  geom_line(data = yhat_by_month, colour = "red")
+
+library(ggdist)
+
+m_labels <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+names(m_labels) <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+
+case_study |>
+  st_drop_geometry() |>
+  group_by(month(date_time), hour(date_time)) |>
+  median_qi(val, yhat, .width = 0.95) |>
+  rename(hour = `hour(date_time)`,
+         month = `month(date_time)`) |>
+  # filter(month == 10) |>
+  ggplot(aes(x = hour, y = val, ymin = val.lower, ymax = val.upper)) +
+  geom_lineribbon(fill = "hotpink", colour = "red", alpha = 0.5) +
+  geom_lineribbon(aes(x = hour, y = yhat, 
+                      ymin = yhat.lower, ymax = yhat.upper),
+                  fill = "purple", colour = "navy", alpha = 0.5) +
+  labs(x = "Adjustment (ppm)", y = "Hour of Day") +
+  facet_wrap(~ month, labeller = labeller(month = m_labels)) +
+  theme_minimal()
+
+
+# geom_line(aes(y=y, x=x, colour = "sin"))+
+#       geom_ribbon(aes(ymin=lower, ymax=upper, x=x, fill = "band"), alpha = 0.3)+
+  
+
+case_study |>
+  st_drop_geometry() |>
+  group_by(month(date_time), hour(date_time)) |>
+  median_qi(val, yhat, .width = 0.95) |>
+  rename(hour = `hour(date_time)`,
+         month = `month(date_time)`) |>
+  # filter(month == 10) |>
+  ggplot(aes(x = hour, y = val, ymin = val.lower, ymax = val.upper)) +
+  geom_line(colour = "red") +
+  geom_ribbon(aes(fill = "Mobile"), alpha = 0.5) +
+  geom_line(aes(x = hour, y = yhat), colour = "navy") +
+  geom_ribbon(aes(ymin = yhat.lower, ymax = yhat.upper,
+                  fill = "Stationary"),
+              alpha = 0.35) +
+  scale_fill_manual(labels = c("Mobile", "Stationary"), values = c("hotpink", "purple")) +
+  labs(x = "Hour of Day", y = "Adjustment (ppm)",
+       fill = "Data") +
+  facet_wrap(~ month, labeller = labeller(month = m_labels)) +
+  theme_minimal()
+
+# ?median_qi
+# 
+# case_study_agg |>
+#   filter(Group.2 == 10) |>
+#   ggplot(aes(x = Group.1, y = x)) +
+#   stat_summary(fun.data = )
+# 
+# 
+# ggplot(case_study, aes(x = date_time, y = val)) +
+#   stat_summary(geom = "ribbon",
+#                fun.data = mean_cl_normal,
+#                fun.args = list(conf.int = 0.95))
+#   geom_line(stat = "summary", fun.y = "median") +
+#   geom_ribbon(stat = "summary", ymin = function(x) quantile(x, 0.25), ymax = function(x) quantile(x, 0.75), fill = "lightblue", alpha = 0.5)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## adjustments over time
 
@@ -74,16 +602,119 @@ o3_df$quarter <- as.factor(
 o3_df$month <- as.factor(
   month(o3_df$date_time))
 
+table(o3_df$month,
+      o3_df$year)
+
+o3_df$hour <- as.factor(
+  hour(o3_df$date_time))
+
+o3_df$day_of_week <- as.factor(
+  wday(o3_df$date_time))
 
 ##### aside: convert to ppm
-o3_df$adj <- o3_df$adj
+# o3_df$adj <- o3_df$adj
+# don't
+
+# distribution of adjustments over hour
+ggplot(o3_df, aes(x = hour, y = adj, fill = hour)) + 
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Dark2") +
+  labs(x = "Year, Season", y = "Adjustment")
+
+table(o3_df$adj > 0.2,
+      o3_df$hour) # most of the wildly high adjustments are late in the night
+
+test <- o3_df |>
+  filter(adj < 0.06 &
+           adj > -0.06)
+
+q_labels <- c("Jan-Mar", "Apr-Jun",
+              "Jul-Sep", "Oct-Dec")
+names(q_labels) <- c(1, 2, 3, 4)
+
+ggplot(test, aes(x = adj, y = hour, fill = stat(x))) + 
+  geom_density_ridges_gradient(scale = 3, rel_min_height = 0.001, show.legend = NA) +
+  # coord_cartesian(clip = "on") +
+  scale_fill_viridis_c(option = "D") +
+  coord_flip() +
+  labs(x = "Adjustment (ppm)", y = "Hour of Day") +
+  theme_minimal() +
+  facet_wrap(~ quarter, labeller = labeller(quarter = q_labels))
 
 
+# does variability in adjustments change by month-time of day
+m_labels <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+names(m_labels) <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+
+ggplot(test, aes(x = adj, y = hour, fill = stat(x))) + 
+  geom_density_ridges_gradient(scale = 3, rel_min_height = 0.001, show.legend = NA) +
+  # coord_cartesian(clip = "on") +
+  scale_fill_viridis_c(option = "D") +
+  coord_flip() +
+  labs(x = "Adjustment (ppm)", y = "Hour of Day") +
+  theme_minimal() +
+  facet_wrap(~ month, labeller = labeller(month = m_labels))
+
+test_2020 <- test |>
+  filter(year == 2020)
+
+ggplot(test_2020, aes(x = adj, y = hour, fill = stat(x))) + 
+  geom_density_ridges_gradient(scale = 3, rel_min_height = 0.001, show.legend = NA) +
+  # coord_cartesian(clip = "on") +
+  scale_fill_viridis_c(option = "D") +
+  coord_flip() +
+  labs(x = "Adjustment (ppm)", y = "Hour of Day") +
+  theme_minimal() +
+  facet_wrap(~ month, labeller = labeller(month = m_labels))
+
+
+
+# is October's variability explained by week day-hour
+w_labels <- c("Sun", "Mon", "Tues", "Wed", "Thurs", "Fri", "Sat")
+names(w_labels ) <- c(1, 2, 3, 4, 5, 6, 7)
+
+test_oct <- test |>
+  filter(year == 2020 &
+           month == 10)
+
+ggplot(test_oct, aes(x = adj, y = hour, fill = stat(x))) + 
+  geom_density_ridges_gradient(scale = 3, rel_min_height = 0.001, show.legend = NA) +
+  # coord_cartesian(clip = "on") +
+  scale_fill_viridis_c(option = "D") +
+  coord_flip() +
+  labs(x = "Adjustment (ppm)", y = "Hour of Day") +
+  theme_minimal() +
+  facet_wrap(~ day_of_week, labeller = labeller(day_of_week = w_labels))
+
+# hourly for entire month
+test_oct$day_hour <- as.factor(
+  round_date(test_oct$date_time, unit = "hour"))
+
+ggplot(test_oct, aes(x = adj, y = day_hour, fill = stat(x))) + 
+  geom_density_ridges_gradient(scale = 3, rel_min_height = 0.001, show.legend = NA, lwd = 0.25) +
+  # coord_cartesian(clip = "on") +
+  scale_fill_viridis_c(option = "D") +
+  coord_flip() +
+  labs(x = "Adjustment (ppm)", y = "Hour of Day") +
+  theme_minimal()# +
+  #facet_wrap(~ week)#, labeller = labeller(day_of_week = w_labels))
+
+# did october have a unique spatial extent?
+test_no_oct <- test |>
+  filter(year == 2020) |>
+  filter(month != 10)
+
+max(test_no_oct$lon) - min(test_no_oct$lon)
+max(test_no_oct$lat) - min(test_no_oct$lat)
+max(test_oct$lon) - min(test_oct$lon)
+max(test_oct$lat) - min(test_oct$lat)
+
+# distribution of adjustments over year, season
 ggplot(o3_df, aes(x = quarter, y = adj, fill = year)) + 
   geom_boxplot() +
   scale_fill_brewer(palette = "Dark2") +
   labs(x = "Year, Season", y = "Adjustment")
-  # facet_wrap(~ year)
 
 
 # have adj changed over time?
@@ -95,9 +726,17 @@ adj_over_time <- group_by(o3_df, year, month) %>%
 
 plot(adj_over_time$mean)
 
-# with ridges, for more information
+# do adjustments change over time of day?
+# have adj changed over time?
+adj_over_tod <- group_by(o3_df, hour) %>%
+  summarise(
+    mean = mean(adj, na.rm = TRUE),
+    sd = sd(adj, na.rm = TRUE)
+  )
 
-library(ggridges)
+plot(adj_over_tod$mean)
+
+# with ridges, for more information
 ggplot(o3_df, aes(x = adj, y = month,#paste(year, month))
                     fill = stat(x))) + 
   geom_density_ridges_gradient(scale = 3, rel_min_height = 0.001) +
@@ -175,27 +814,125 @@ ggplot(grid_sf, aes(x = time_of_day)) +
 
 ```{r}
 
-# 0.070 ppm excedance and adjustments
+# 0.070 ppm exceedance and adjustments
 
-table(o3_df$yhat < 0.07, o3_df$adj > 0)
+# is the predicted o3 above 0.070, and is this an underestimate?
+exc_adj = data.frame(table(o3_df$yhat > 0.07, o3_df$adj > 0))
 
-prop.table(table(o3_df$yhat < 0.07, o3_df$adj > 0))
-# 37.1% of the time, O3 is thought to be below 0.070 AND this is an underestimate
-# 64.4% of the time, O3 is thought to be below 0.070 AND this is an overestimate
-# 0.1% of the time, O3 is thought to be above 0.070 AND this is an underestimate
-# 0.4% of the time, O3 is thought to be above 0.070 AND this is an overestimate
+below_under = exc_adj[1, "Freq"]
+above_under = exc_adj[2, "Freq"]
+below_over = exc_adj[3, "Freq"]
+above_over = exc_adj[4, "Freq"]
+
+prop.table(table(o3_df$yhat > 0.07, o3_df$adj > 0))
+# - 37.1% of the time, O3 is thought to be below 0.070 AND this is an underestimate
+##    worse than safe
+# - 64.4% of the time, O3 is thought to be below 0.070 AND this is an overestimate
+##    better than safe
+# - 0.1% of the time, O3 is thought to be above 0.070 AND this is an underestimate
+##    worse than unsafe
+# - 0.4% of the time, O3 is thought to be above 0.070 AND this is an overestimate
+##    better than unsafe
 
 # i.e., in relative terms
-2195511 / 5822
-# a <0.070 underestimate is 377-times more likely than a >0.070 underestimate
-3692038 / 22137
-# a <0.070 overestimate is 167-times more likely than a >0.070 overestimate
-(3692038 + 22137) / (2195511 + 5822)
+below_under / above_under
+# a <0.070 underestimate is 167-times more likely than a >0.070 underestimate
+below_over / above_over
+# a <0.070 overestimate is 377-times more likely than a >0.070 overestimate
+(below_under + above_under) / (below_over + above_over)
 # overall, an overestimate is 69% more likely than an underestimate
+(below_under + below_over) / (above_under + above_over)
+# overall, a <0.070 prediction is 211-times more likely than >0.070
+table(o3_df$val > 0.07)[1] / table(o3_df$val > 0.07)[2]
+# a <0.070 mobile observation is 259-times more likely than a >0.070 observation
 
 ## note: this does not tell us about the spread, or variability; i.e., how wrong we are; just the direction
 
+## range of over- / under-estimate
+summary(o3_df[which(o3_df$adj < 0), "val"])
+hist(o3_df[which(o3_df$adj < 0), "val"])
+# when o3 is better than expected, it's typically "off" by 24 ppb
+summary(o3_df[which(o3_df$adj > 0), "val"])
+hist(o3_df[which(o3_df$adj > 0), "val"])
+# when o3 is worse than expected, it's typically "off" by 35 ppb
+o3_under <- o3_df[which(o3_df$adj > 0), ] # getting all underestimates
+summary(o3_under$yhat)
+# when o3 is worse than expected, the conc is usually 29 ppb, but as high as 100 ppb
+o3_under[which(o3_under$yhat > 0.099), ]
+# - this was the afternoon of July 12, 2021, throughout the valley; monitors thought it was under 100 ppb, but it was as high as 109 ppb
+bad_locs <- o3_under[which(o3_under$yhat > 0.099), ] |>
+  st_as_sf(coords = c("lon", "lat"), crs = 4326)
 
+tmap_mode("plot")
+
+tm_shape(bad_locs) +
+  tm_dots(col = "val", palette = "-Spectral", style = "cont",
+          size = 0.1, alpha = 0.6, border.lwd = 0)
+
+bad_day <- o3_df[which(date(o3_df$date_time) == "2021-07-12" &
+                          hour(o3_df$date_time) > 12 &
+                          hour(o3_df$date_time) < 17), ] |>
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) |>
+  arrange(desc(date_time))
+
+summary(bad_day$val)
+
+bad_day_val <- tm_shape(bad_day) +
+  tm_symbols(col = "val", shape = 19, #fill.scale = tm_scale_continuous(limits = c(0.035, 0.114)),
+             palette = "-brewer.spectral", style = "cont", breaks = seq(0.06, 0.11, by = 0.015),
+             size = 0.75, alpha = 0.8,
+             # title = "O3 (mobile)",
+          tm_add_legend("col", type = "symbols",
+                 title = "title here" 
+                 )) +
+  tm_layout(title = "O3 (mobile)", title.position = c('center', 'top'), frame = FALSE)
+  # tm_borders(lwd = 0)
+
+bad_day_yhat <- tm_shape(bad_day) +
+  tm_symbols(col = "yhat", shape = 19, #fill.scale = tm_scale_continuous(limits = c(0.035, 0.114)),
+             palette = "-brewer.spectral", style = "cont", breaks = seq(0.06, 0.11, by = 0.015),
+             size = 0.75, alpha = 0.8,
+             # title = "O3 (mobile)",
+          tm_add_legend("col", type = "symbols",
+                 title = "title here" 
+                 )) +
+  tm_layout(title = "O3 (stationary)", title.position = c('center', 'top'), frame = FALSE)
+  # tm_borders(lwd = 0)
+#
+tmap_arrange(bad_day_val, bad_day_yhat)
+
+
+summary(o3_df[which(o3_df$adj < 0), "val"])
+hist(o3_df[which(o3_df$adj < 0), "val"])
+
+summary(o3_df[which(o3_df$adj < 0), "yhat"])
+hist(o3_df[which(o3_df$adj < 0), "yhat"])
+
+summary(o3_df$yhat)
+summary(o3_df$val)
+
+
+o3_df_long <- o3_df |>
+  pivot_longer(cols = c("val", "yhat")) |>
+  mutate(name = ifelse(name == "val", "Mobile", "Stationary")) |>
+  arrange(name)
+
+ggplot(o3_df_long, aes(x = value, colour = name, fill = name)) +
+  geom_histogram(position = "identity", alpha = 0.5, binwidth = 0.005) +
+  scale_color_manual(values = c("#E7298AFF", "#D95F02FF")) +
+  scale_fill_manual("O3 Data", values = c("#E7298AFF", "#D95F02FF")) +
+  labs(x = "O3 (ppm)", y = "Count") +
+  # labs(fill = 'NEW LEGEND TITLE') +
+  theme_minimal()
+
+
+ggplot(o3_df, aes(x = val, fill = "#E7298AFF")) +
+  geom_histogram(position = "identity", alpha = 1, binwidth = 0.01) +
+  # scale_color_manual(values = c("#E7298AFF")) +
+  # scale_fill_manual("O3 Data", values = c("#E7298AFF", "#D95F02FF")) +
+  labs(x = "O3 (ppm)", y = "Count") +
+  # labs(fill = 'NEW LEGEND TITLE') +
+  theme_minimal()
 
 ```
 
@@ -207,12 +944,8 @@ Get SL County geometry, grid cells
 
 # slc_cnty = st_read("./data/SLC/Salt_lake.shp")
 
-slc_cnty <- get_acs(geography = "county",
-                    variables = c('B01001_001'),
-                    state = "UT",
-                    geometry = TRUE,
-                    year = 2021) |>
-  filter(NAME == "Salt Lake County, Utah")
+slc_cnty <- st_read("/Users/brenna/Downloads/tl_2022_us_county/tl_2022_us_county.shp") |>
+  filter(STATEFP == "49" & COUNTYFP == "035")
 
 fishnet = slc_cnty %>%
   st_make_grid(cellsize = 0.01, what = "polygons") %>%
@@ -228,8 +961,8 @@ fishnet = slc_cnty %>%
 
 # preparing data for spatial join
 dat_sf <- st_as_sf(o3_df, coords = c("lon", "lat"), crs = 4326)
-dat_sf$longitude <- dat$lon
-dat_sf$latitude <- dat$lat
+dat_sf$longitude <- dat_sf$lon
+dat_sf$latitude <- dat_sf$lat
 
 fishnet <- st_transform(fishnet, crs = st_crs(dat_sf))
 
@@ -255,6 +988,157 @@ grid_no_geom <- grid_sf |>
 grid_dat <- merge(fishnet, grid_no_geom, by = "fishnet_id")
 
 ```
+
+Mapping the aggregation to grid cell level
+
+```{r}
+
+# peak adjustment
+summary(grid_dat$adj_high)
+
+pal <- colorNumeric(
+  palette = "Spectral",
+  domain = c(-0.024, 0.024), reverse = TRUE)
+
+leaflet() |>
+  setView(-111.86, 40.675, zoom = 10) |>
+  addProviderTiles(providers$CartoDB.Positron) |>
+  addPolygons(data = grid_dat, color = ~pal(adj_high), fillOpacity = 0.75, stroke = FALSE) |>
+  addLegend('bottomright', pal = pal, values = grid_dat$adj_high,
+            title = "Peak adjustment")
+
+# observed median
+summary(grid_dat$obs_median)
+
+pal <- colorNumeric(
+  palette = "viridis",
+  domain = c(0, 0.0662), reverse = FALSE)
+
+leaflet() |>
+  setView(-111.86, 40.675, zoom = 10) |>
+  addProviderTiles(providers$CartoDB.Positron) |>
+  addPolygons(data = grid_dat, color = ~pal(obs_median), fillOpacity = 0.75, stroke = FALSE) |>
+  addLegend('bottomright', pal = pal, values = grid_dat$obs_median,
+            title = "Median observed value")
+
+# predicted median
+summary(grid_dat$pred_median)
+
+pal <- colorNumeric(
+  palette = "viridis",
+  domain = c(0, 0.0662), reverse = FALSE)
+
+leaflet() |>
+  setView(-111.86, 40.675, zoom = 10) |>
+  addProviderTiles(providers$CartoDB.Positron) |>
+  addPolygons(data = grid_dat, color = ~pal(pred_median), fillOpacity = 0.75, stroke = FALSE) |>
+  addLegend('bottomright', pal = pal, values = grid_dat$pred_median,
+            title = "Median predicted value")
+
+```
+
+Aggregating to grid cell-year-month
+
+```{r}
+
+grid_no_geom_ym <- grid_sf |>
+  st_drop_geometry() |>
+  merge(fishnet, by = "fishnet_id") |>
+  group_by(fishnet_id, year, month) |>
+  summarize(obs_mean = mean(val, na.rm = TRUE),
+            pred_mean = mean(yhat, na.rm = TRUE),
+            adj_mean = mean(adj, na.rm = TRUE),
+            obs_median = median(val, na.rm = TRUE),
+            pred_median = median(yhat, na.rm = TRUE),
+            adj_median = median(adj, na.rm = TRUE),
+            obs_high = quantile(val, 0.95, na.rm = TRUE),
+            pred_high = quantile(yhat, 0.95, na.rm = TRUE),
+            adj_high = quantile(adj, 0.95, na.rm = TRUE),
+            count = n()) %>%
+  ungroup()
+
+grid_dat_ym <- merge(fishnet, grid_no_geom_ym, by = "fishnet_id")
+
+# for October 2020
+
+# observed median
+
+oct_20 <- grid_dat_ym |>
+  filter(year == 2020 &
+           month == 10)
+
+# aggregate(grid_dat_ym$obs_median, by = list(grid_dat_ym$year, grid_dat_ym$month), FUN = median)
+summary(oct_20$obs_median)
+
+pal <- colorNumeric(
+  palette = "viridis",
+  domain = c(0, 0.05609), reverse = FALSE)
+
+leaflet() |>
+  setView(-111.86, 40.675, zoom = 10) |>
+  addProviderTiles(providers$CartoDB.Positron) |>
+  addPolygons(data = oct_20, color = ~pal(obs_median), fillOpacity = 0.75, stroke = FALSE) |>
+  addLegend('bottomright', pal = pal, values = oct_20$obs_median,
+            title = "Median observed value")
+
+# predicted median
+summary(oct_20$pred_median)
+
+pal <- colorNumeric(
+  palette = "viridis",
+  domain = c(0, 0.05609), reverse = FALSE)
+
+leaflet() |>
+  setView(-111.86, 40.675, zoom = 10) |>
+  addProviderTiles(providers$CartoDB.Positron) |>
+  addPolygons(data = oct_20, color = ~pal(pred_median), fillOpacity = 0.75, stroke = FALSE) |>
+  addLegend('bottomright', pal = pal, values = oct_20$pred_median,
+            title = "Median observed value")
+
+```
+
+## looped animation for monthly adjustments
+
+```{r}
+
+summary(grid_dat_ym$adj_high)
+
+library(mapview)
+library(webshot)
+install.packages("webshot")
+
+
+for(i in unique(grid_dat_ym$year)) {
+  for(j in unique(grid_dat_ym$month)) {
+    
+    dat_loop <- grid_dat_ym |>
+      filter(year == i &
+               month == j)
+    
+    pal <- colorNumeric(
+      palette = "Spectral",
+      domain = c(-0.05, 0.05), reverse = TRUE)
+    
+    adj_map <- leaflet() |>
+      setView(-111.86, 40.675, zoom = 10) |>
+      addProviderTiles(providers$CartoDB.Positron) |>
+      addPolygons(data = dat_loop, color = ~pal(adj_high), fillOpacity = 0.75, stroke = FALSE) |>
+      addLegend('bottomright', pal = pal, values = dat_loop$adj_high,
+                title = "Median adjustment")
+    
+    # Define filename
+    filename <- paste0("adj_map_", i, "_", j, ".png")
+    
+    # Save map to image
+    mapshot(adj_map, file = filename)
+    
+  }
+}
+
+
+```
+
+
 
 
 # things we don't need the full dataset for  
