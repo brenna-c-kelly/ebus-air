@@ -110,12 +110,40 @@ library(tableone) ## maybe don't use table one
 
 # create variables of interest
 o3_df_clean <- o3_df_clean |>
-  mutate(month = month(date_time, label = TRUE)) |>
-  mutate(day_of_week = wday(date_time, week_start = 7, # start week with Sunday
-                            label = TRUE)) |>
-  mutate(hour = hour(date_time)) |>
+  mutate(month = lubridate::month(date_time, label = TRUE)) |>
+  mutate(day_of_week = lubridate::wday(date_time, week_start = 7)) |> #, # start week with Sunday
+                            #label = TRUE)) |>
+  mutate(hour = lubridate::hour(date_time)) |>
   mutate(weekend = ifelse(day_of_week %in% c("Sunday", "Saturday"),
                           "weekend", "weekday"))
+
+o3_df_clean <- o3_df_clean |>
+  mutate(season = case_when(o3_df_clean$date_time < "2023-03-20" ~ "Winter",
+                            o3_df_clean$date_time < "2023-06-21" ~ "Spring",
+                            o3_df_clean$date_time < "2023-09-22" ~ "Summer",
+                            o3_df_clean$date_time < "2023-12-21" ~ "Autumn",
+                            o3_df_clean$date_time >= "2023-12-21" ~ "Winter"))
+
+aggregate(o3_df_clean$adj, by = list(o3_df_clean$season), FUN = mean)
+aggregate(o3_df_clean$adj, by = list(o3_df_clean$season), FUN = sd)
+aggregate(o3_df_clean$adj, by = list(o3_df_clean$season), FUN = min)
+aggregate(o3_df_clean$adj, by = list(o3_df_clean$season), FUN = max)
+aggregate(o3_df_clean$adj, by = list(o3_df_clean$month), 
+          FUN = 'quantile', probs = c(0.025, 0.25, 0.5, 0.75, 0.975))
+
+summary(
+  aov(adj ~ season, data = o3_df_clean)
+)
+
+# CreateTableOne(vars = "adj", strata = c("month", "day_of_week", "hour", "weekend",
+#                                         "season"), data = o3_df_clean,
+#                testNonNormal = kruskal.test)
+
+
+```
+
+
+```{r}
 
 # exceptional events
 # https://aqs.epa.gov/aqsweb/documents/codetables/qualifiers.html
@@ -161,17 +189,17 @@ ggplot(o3_df_clean, aes(x = adj)) +
 # observed values
 ggplot(o3_df_clean, aes(x = val)) +
   geom_histogram(bins = 40, aes(fill = exception)) +
-  labs(x = "Adjustment (ppb)", y = "Count", 
-       title = "Distribution of Adjustments",
-       subtitle = "Observed value \u2013 predicted value") +
+  labs(x = "O3 concetration (ppb)", y = "Count", 
+       title = "Distribution of Observed O3",
+       subtitle = "Mobile observations") +
   theme_bw(base_family = "Century Gothic") +
   facet_wrap(~ exception, scales = "free_y")
 
 
 aggregate(o3_df_clean$adj, by = list(o3_df_clean$exception), FUN = mean)
 aggregate(o3_df_clean$adj, by = list(o3_df_clean$exception), FUN = sd)
-# on average, we overestimate O3 more during days without exceptions
-# i.e., mobile O3 is better than expected on fire days and outlier days
+# on average, we overestimate O3 more during fires but less during "outliers"
+# but this is highly variable
 
 # anova
 res_aov <- aov(adj ~ exception, data = o3_df_clean)
@@ -183,10 +211,10 @@ summary(res_aov) # adjustments are different across exception
 # interestingly, O3 tends to be higher on days without exceptional events
 aggregate(o3_df_clean$val, by = list(o3_df_clean$exception), FUN = median)
 aggregate(o3_df_clean$val, by = list(o3_df_clean$exception), FUN = mean)
-
+# weird that "outlier" days have such low O3
 
 ## just checking that we captured the right dates; apparently we did
-# we meaning, me and my computer
+# we, meaning me and my computer
 outlier <- o3_df_clean |>
   filter(exception == "outlier")
 
