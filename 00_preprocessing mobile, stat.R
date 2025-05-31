@@ -22,13 +22,18 @@ o3_files <- paste0("data/aqs/o3/", list.files("data/aqs/o3/"))
 o3_table <- lapply(o3_files, read.csv, header = TRUE)
 
 o3.df <- do.call(rbind , o3_table) |>
-  select(c("Site.Num", "Latitude", "Longitude", "Parameter.Name", 
+  dplyr::select(c("Site.Num", "Latitude", "Longitude", "Parameter.Name", 
            "Date.Local", "Time.Local", # use local time, not GMT (Greenwich Mean Time)
            "Sample.Measurement", "Units.of.Measure"))
 
 names(o3.df) <- tolower(names(o3.df))
 
-o3.df$day_time <- ymd_hm(paste(o3.df$date.local, o3.df$time.local), tz = "UTC")
+# note: when DST comes into effect, won't parse
+# force_tz(
+#   ymd_hm("2019-03-10 02:00"),
+#   tzone = "America/Denver")
+
+o3.df$day_time <- ymd_hm(paste(o3.df$date.local, o3.df$time.local), tz = "America/Denver")
 # o3.df$day_time <- paste0(gsub(" ", "T", o3.df$day_time), "Z")
 o3.df$date <- ymd(o3.df$date.local)
 o3.df$hour <- hour(o3.df$day_time)
@@ -36,8 +41,19 @@ o3.df$hour <- hour(o3.df$day_time)
 o3.df <- o3.df[, c("site.num", "latitude", "longitude", "parameter.name",
                    "day_time", "date", "hour", "sample.measurement")]
 
-write.csv(o3.df, "data/aqs/aqs_o3.csv", row.names = FALSE)
+o3.df <- o3.df |>
+  filter(day_time >= "2018-12-14")
 
+write.csv(o3.df, "data/aqs/aqs_o3_v4.csv", row.names = FALSE)
+# v1: 2019-2024 (ragged)
+# v2: 2018-2023 (need last two weeks of 2018)
+# v3: 2019-2023 (last two weeks of 2019; mobile doesn't have 2018)
+# v4: 2018-2024 (only last two weeks of 2018)
+# v_2024: 2024 + last two weeks of 2023
+
+test <- o3.df |>
+  mutate(day_time = as.character(format(day_time)))
+head(test)
 #### preprocessing mobile data
 
 ### ebus
@@ -97,5 +113,18 @@ mobile_clean <- mobile |>
   filter(!is.na(O3)) |>
   filter(O3F == 0)
 
-write.csv(mobile_clean, "data/mobile/mobile_o3_clean2.csv", row.names = FALSE)
+# fixing time 5/21/25
+mobile$times <- as.character(format(mobile$times))
+
+write.csv(mobile_clean, "data/mobile/mobile_o3_clean.csv", row.names = FALSE)
 head(mobile_clean)
+
+mobile_clean <- fread("/Users/brenna/Documents/School/Research/ebus_air/ebus-air/data/mobile/mobile_o3_clean2.csv")
+mobile_clean$times <- ymd_hms(mobile_clean$times) - 7*60*60
+
+plot(aggregate(mobile_clean$O3, by = list(hour(mobile_clean$times)), FUN = mean))
+
+write.csv(mobile_clean, "data/mobile/mobile_o3_v3.csv", row.names = FALSE)
+# v3: with only last two weeks of 2019; no 2024
+
+

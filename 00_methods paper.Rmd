@@ -148,6 +148,7 @@ summary(
 # exceptional events
 # https://aqs.epa.gov/aqsweb/documents/codetables/qualifiers.html
 aqs <- read.csv("data/aqs/o3/hourly_44201_2023.csv")
+2.1
 table(aqs$Qualifier)
 # Just FYI, MDL = 0.005, or 5; minimum detectable level
 
