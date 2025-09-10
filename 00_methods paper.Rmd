@@ -36,9 +36,10 @@ loadfonts(quiet = T)
 
 ```{r}
 
-# o3_files <- paste0("output/o3/", list.files("output/o3/"))
+# o3_files <- paste0("../ebus-python/data/output/o3/", 
+#                    list.files("../ebus-python/data/output/o3/"))
 # 
-# o3_table <- lapply(o3_files, read.csv)
+# o3_table <- lapply(o3_files, fread)
 # 
 # o3_df <- do.call("rbind", o3_table)
 
@@ -50,6 +51,7 @@ write it / read it:
 
 # write.csv(o3_df, "o3_full_period.csv", row.names = FALSE)
 o3_df <- fread("o3_full_period.csv")
+# pm_df <- fread("output/pm25/all_adj.csv")
 
 ```
 
@@ -58,22 +60,84 @@ o3_df <- fread("o3_full_period.csv")
 
 ```{r}
 
+# note 9/9: the units were wrong when ran 2019-2024
+# - use with transform here for now
+# v2 should have the correct units
+
 o3_df_clean <- o3_df |>
-  filter(date_time >= "2023-01-01" &
-           date_time < "2023-12-31")
+  filter(date_time >= "2019-01-01") |>
+  # ppm to ppb
+  mutate(yhat = yhat * 1000) |>
+  # mutate(val = val * 1000) |>
+  mutate(adj = val - yhat)
 
 summary(o3_df_clean$date_time)
 
+o3_df_clean$date <- as.Date(o3_df_clean$date_time)
 o3_df_clean <- o3_df_clean |>
-  mutate(yhat = yhat * 1000) |>
-  mutate(val = val * 1000) |>
-  mutate(adj = adj * 1000)
+  filter(val < 175) # see note below
 
-## adding characteristics of potential interest
-
+## convert to spatial for mapping
 o3_sf <- st_as_sf(o3_df_clean, 
                   coords = c("lon", "lat"), 
                   crs = 4326)
+
+
+### there are a handful (12) observations with ridiculously high O3
+## - these took place at the railyard and (I think?) the depot
+## - they happened either around midnight or not in summer
+## - will exclude higher than 175
+# o3_sf |>
+#   # filter(date == "2020-08-14") |>
+#   filter(val > 175) |>
+#   tm_shape() +
+#   tm_dots(fill = "val", size = 2, fill_alpha = 0.9, 
+#           tm_scale_continuous(values = "viridis"))
+
+
+## negative values were truncated at 0
+## - is this a reasonable assumption?
+aggregate(o3_df_clean$yhat, by = list(o3_df_clean$val == 0), FUN = median)
+## probably
+# o3_sf |>
+#   # filter(date == "2020-08-14") |>
+#   filter(val == 0) |>
+#   tm_shape() +
+#   tm_dots(fill = "yhat", size = 2, fill_alpha = 0.9, 
+#           tm_scale_continuous(values = "viridis"))
+
+```
+
+### Add characteristics
+
+```{r}
+
+# day of week
+o3_df_clean$day_of_week <- wday(o3_df_clean$date_time)
+o3_df_clean$day_of_week_label <- wday(o3_df_clean$date_time, label = TRUE)
+# weekend
+o3_df_clean$day_type <- ifelse(o3_df_clean$day_of_week %in% c(1, 7), 
+                           "weekend", "weekday")
+
+# time of day
+o3_df_clean$time_of_day <- hour(o3_df_clean$date_time)
+
+# month, season
+# create variables of interest
+o3_df_clean <- o3_df_clean |>
+  mutate(month = lubridate::month(date_time, label = TRUE)) |>
+  mutate(day_of_week = lubridate::wday(date_time, week_start = 7)) |> #, # start week with Sunday
+                            #label = TRUE)) |>
+  mutate(hour = lubridate::hour(date_time)) |>
+  mutate(weekend = ifelse(day_of_week %in% c("Sunday", "Saturday"),
+                          "weekend", "weekday"))
+
+o3_df_clean <- o3_df_clean |>
+  mutate(season = case_when(o3_df_clean$date_time < "2023-03-20" ~ "Winter",
+                            o3_df_clean$date_time < "2023-06-21" ~ "Spring",
+                            o3_df_clean$date_time < "2023-09-22" ~ "Summer",
+                            o3_df_clean$date_time < "2023-12-21" ~ "Autumn",
+                            o3_df_clean$date_time >= "2023-12-21" ~ "Winter"))
 
 ```
 
@@ -98,49 +162,608 @@ ggplot(o3_df_clean, aes(x = adj)) +
   labs(x = "Adjustment (ppb)", y = "Count", 
        title = "Distribution of Adjustments",
        subtitle = "Observed value \u2013 predicted value") +
-  theme_bw(base_family = "Century Gothic")
+  theme_bw(base_family = "Arial")
+
+summary(o3_df_clean$adj)
+
+# library(ggpubr)
+# ggqqplot(o3_df_clean$adj)
+
+# Shapiro-Wilk test for normality
+# shapiro.test(o3_df_clean$)
+
+# skewness
+library(moments)
+skewness(o3_df_clean$adj) # let's call it normal
+
+
+summary(o3_df_clean$adj)
+
 
 ```
+
+The median adjustment is -1.46 (IQR [-5.44, 1.94]), meaning in a typical scenario in this dataset, the mobile observations overestimated O3 by about 1.5 ppb. Adjustment values also ranged from -80.7 to 144.8 — substantial over- and underestimates, respectively.
+
+###
+stop dicking around and make a map
+
+```{r}
+
+o3_sf
+
+## make the grid cells
+slc_cnty <- get_acs(geography = "county",
+                    variables = c('B01001_001'),
+                    state = "UT",
+                    geometry = TRUE,
+                    year = 2021) |>
+  filter(NAME == "Salt Lake County, Utah")
+
+slc_cnty <- st_transform(slc_cnty, st_crs(o3_sf))
+
+fishnet = slc_cnty %>%
+  st_make_grid(cellsize = 0.005, what = "polygons") %>% 
+  # make cell size 0.005 degrees, or ~500 m
+  st_as_sf() %>%
+  rename(geometry = x) %>%
+  mutate(fishnet_id = 1:n()) %>%
+  dplyr::select(fishnet_id, geometry)
+
+## assign points to grid cells
+fishnet <- st_transform(fishnet, crs = st_crs(o3_sf))
+# only grid cells located in salt lake county
+fishnet <- st_join(fishnet, slc_cnty, join = st_intersects) |>
+  filter(!is.na(GEOID)) |>
+  select(!c(GEOID, NAME, variable, estimate, moe))
+
+grid_sf <- st_join(o3_sf, fishnet, join = st_intersects)
+
+## aggregating data to the grid level)
+
+grid_agg <- grid_sf |>
+  st_drop_geometry() |>
+  merge(fishnet, by = "fishnet_id") |>
+  group_by(fishnet_id) |>
+  summarize(obs_mean = mean(val, na.rm = TRUE),
+            pred_mean = mean(yhat, na.rm = TRUE),
+            adj_mean = mean(adj, na.rm = TRUE),
+            obs_median = median(val, na.rm = TRUE),
+            pred_median = median(yhat, na.rm = TRUE),
+            adj_median = median(adj, na.rm = TRUE),
+            obs_low = quantile(val, 0.025, na.rm = TRUE),
+            pred_low = quantile(yhat, 0.025, na.rm = TRUE),
+            adj_low = quantile(adj, 0.025, na.rm = TRUE),
+            obs_high = quantile(val, 0.975, na.rm = TRUE),
+            pred_high = quantile(yhat, 0.975, na.rm = TRUE),
+            adj_high = quantile(adj, 0.975, na.rm = TRUE),
+            count = n()) %>%
+  ungroup()
+
+grid_agg_dat <- merge(fishnet, grid_agg, by = "fishnet_id")
+
+tmap_mode(mode = "plot")
+### maps
+
+# median
+median_adj <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(grid_agg_dat) +
+  tm_polygons(fill = "adj_median", lwd = 0,
+              tm_scale_continuous(values = c("royalblue1", 
+                                             "white", 
+                                             "orangered"),
+                                  limits = c(-43, 43),
+                                  midpoint = 0),
+              fill.legend = tm_legend(reverse = TRUE, show = TRUE,
+                                      title = "Aggregated \nAdjustment")) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_title("Median")
+
+# 97.5th percentile
+upper_adj <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(grid_agg_dat) +
+  tm_polygons(fill = "adj_high", lwd = 0,
+              tm_scale_continuous(values = c("royalblue1", 
+                                             "white", 
+                                             "orangered"),
+                                  limits = c(-43, 43),
+                                  midpoint = 0),
+              fill.legend = tm_legend(reverse = TRUE, show = TRUE,
+                                      title = "Aggregated \nAdjustment")) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_title("97.5th percentile")
+
+# 2.5th percentile
+lower_adj <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(grid_agg_dat) +
+  tm_polygons(fill = "adj_low", lwd = 0,
+              tm_scale_continuous(values = c("royalblue1", 
+                                             "white", 
+                                             "orangered"),
+                                  limits = c(-43, 43),
+                                  midpoint = 0),
+              fill.legend = tm_legend(reverse = TRUE, show = TRUE,
+                                      title = "Aggregated \nAdjustment")) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_title("2.5th percentile") +
+  tmap_options(component.autoscale = TRUE)
+
+tmap_arrange(median_adj, lower_adj, upper_adj, ncol = 3)
+
+
+### areas with consistently high or low adjustment
+
+grid_agg_dat$adj_consistent <- case_when(grid_agg_dat$adj_low > 0 &
+                                           grid_agg_dat$adj_high > 0 ~ "underestimation",
+                                         grid_agg_dat$adj_low < 0 &
+                                           grid_agg_dat$adj_high < 0 ~ "overestimation")
+grid_agg_dat$adj_consistent <- ifelse(is.na(grid_agg_dat$adj_consistent),
+                                      "not consistent", grid_agg_dat$adj_consistent)
+table(grid_agg_dat$adj_consistent)
+
+tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(grid_agg_dat) +
+  tm_polygons(fill = "adj_median", lwd = 0,
+              tm_scale_continuous(values = c("royalblue1", 
+                                             "white", 
+                                             "orangered"),
+                                  limits = c(-43, 43),
+                                  midpoint = 0),
+              fill.legend = tm_legend(reverse = TRUE, show = FALSE,
+                                      title = "Aggregated \nAdjustment")) +
+  tm_shape(grid_agg_dat |>
+             filter(adj_consistent != "not consistent")) +
+  tm_polygons(fill = "adj_median", col = "black", lwd = 0.5,
+              tm_scale_continuous(values = c("royalblue1", 
+                                             "white", 
+                                             "orangered"),
+                                  limits = c(-43, 43),
+                                  midpoint = 0),
+              fill.legend = tm_legend(reverse = TRUE, show = FALSE,
+                                      title = "Aggregated \nAdjustment"))
+
+aggregate(grid_agg_dat$count, by = list(grid_agg_dat$adj_consistent), FUN = mean)
+# the grid cells with consistent results tend to have fewer than 4 
+aggregate(grid_agg_dat$count, by = list(grid_agg_dat$adj_consistent == "not consistent"), FUN = mean)
+# in fact, those without a consistent adjustment trend have an average of 7918 level-3 observations
+# those with a consistent adjustment trend have an average of 3.5 level-3 observations
+
+
+```
+
+### Prototypical examples
+
+```{r}
+
+grid_agg_oct <- grid_sf |>
+  st_drop_geometry() |>
+  # merge(fishnet, by = "fishnet_id") |>
+  mutate(month = lubridate::month(date)) |>
+  # mutate(day_of_week = lubridate::wday(date, label = TRUE)) |>
+  # mutate(hour = lubridate::hour(date)) |>
+  filter(month == 3)|># & day_of_week == "Tue" & hour == 7) |>
+  group_by(fishnet_id)|>#, month) |>
+  summarize(obs_mean = mean(val, na.rm = TRUE),
+            pred_mean = mean(yhat, na.rm = TRUE),
+            adj_mean = mean(adj, na.rm = TRUE),
+            obs_median = median(val, na.rm = TRUE),
+            pred_median = median(yhat, na.rm = TRUE),
+            adj_median = median(adj, na.rm = TRUE),
+            obs_low = quantile(val, 0.025, na.rm = TRUE),
+            pred_low = quantile(yhat, 0.025, na.rm = TRUE),
+            adj_low = quantile(adj, 0.025, na.rm = TRUE),
+            obs_high = quantile(val, 0.975, na.rm = TRUE),
+            pred_high = quantile(yhat, 0.975, na.rm = TRUE),
+            adj_high = quantile(adj, 0.975, na.rm = TRUE),
+            count = n()) %>%
+  ungroup()
+
+grid_agg_oct <- merge(fishnet, grid_agg_oct, by = "fishnet_id")
+grid_agg_months <- merge(fishnet, grid_agg_months, by = "fishnet_id")
+
+tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(grid_agg_months) +
+  tm_polygons(fill = "adj_low", lwd = 0,
+              tm_scale_continuous(values = c("royalblue1", 
+                                             "white", 
+                                             "orangered"),
+                                  limits = c(-53.6, 53.6),
+                                  midpoint = 0),
+              fill.legend = tm_legend(reverse = TRUE, show = TRUE,
+                                      title = "Aggregated \nAdjustment")) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_facets(by = "month")
+
+# tmap_mode(mode = "plot")
+### maps
+# median
+#median_adj <- 
+# summary(grid_agg_oct$adj_high)
+# summary(grid_agg_jul$adj_high)
+# summary(grid_agg_feb$adj_high)
+# summary(grid_agg_oct$adj_low)
+# summary(grid_agg_jul$adj_low)
+# summary(grid_agg_feb$adj_low)
+
+oct <-
+  tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(grid_agg_oct) +
+  tm_polygons(fill = "adj_low", lwd = 0,
+              tm_scale_continuous(values = c("royalblue1", 
+                                             "white", 
+                                             "orangered"),
+                                  limits = c(-53.6, 53.6),
+                                  midpoint = 0),
+              fill.legend = tm_legend(reverse = TRUE, show = TRUE,
+                                      title = "Aggregated \nAdjustment")) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_title("October")
+
+jul <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(grid_agg_jul) +
+  tm_polygons(fill = "adj_low", lwd = 0,
+              tm_scale_continuous(values = c("royalblue1", 
+                                             "white", 
+                                             "orangered"),
+                                  limits = c(-53.6, 53.6),
+                                  midpoint = 0),
+              fill.legend = tm_legend(reverse = TRUE, show = TRUE,
+                                      title = "Aggregated \nAdjustment")) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_title("July")
+feb <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(grid_agg_feb) +
+  tm_polygons(fill = "adj_low", lwd = 0,
+              tm_scale_continuous(values = c("royalblue1", 
+                                             "white", 
+                                             "orangered"),
+                                  limits = c(-53.6, 53.6),
+                                  midpoint = 0),
+              fill.legend = tm_legend(reverse = TRUE, show = TRUE,
+                                      title = "Aggregated \nAdjustment")) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_title("February")
+
+tmap_arrange(feb, jul, oct, ncol = 3)
+
+
+oct <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(grid_agg_oct) +
+  tm_polygons(fill = "count", lwd = 0,
+              tm_scale_continuous_log10(values = "viridis",
+                                  limits = c(1, 59300)),
+              fill.legend = tm_legend(reverse = TRUE, show = TRUE,
+                                      title = "Aggregated \nAdjustment")) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_title("October")
+jul <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(grid_agg_jul) +
+  tm_polygons(fill = "count", lwd = 0,
+              tm_scale_continuous_log10(values = "viridis",
+                                  limits = c(1, 59300)),
+              fill.legend = tm_legend(reverse = TRUE, show = TRUE,
+                                      title = "Aggregated \nAdjustment")) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_title("July")
+feb <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(grid_agg_feb) +
+  tm_polygons(fill = "count", lwd = 0,
+              tm_scale_continuous_log10(values = "viridis",
+                                  limits = c(1, 59300)),
+              fill.legend = tm_legend(reverse = TRUE, show = TRUE,
+                                      title = "Aggregated \nAdjustment")) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_title("February")
+
+tmap_arrange(feb, jul, oct, ncol = 3)
+
+
+
+
+# 97.5th percentile
+upper_adj <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(grid_agg_dat) +
+  tm_polygons(fill = "adj_high", lwd = 0,
+              tm_scale_continuous(values = c("royalblue1", 
+                                             "white", 
+                                             "orangered"),
+                                  limits = c(-53.6, 53.6),
+                                  midpoint = 0),
+              fill.legend = tm_legend(reverse = TRUE, show = TRUE,
+                                      title = "Aggregated \nAdjustment")) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_title("97.5th percentile")
+
+# 2.5th percentile
+lower_adj <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(grid_agg_dat) +
+  tm_polygons(fill = "adj_low", lwd = 0,
+              tm_scale_continuous(values = c("royalblue1", 
+                                             "white", 
+                                             "orangered"),
+                                  limits = c(-43, 43),
+                                  midpoint = 0),
+              fill.legend = tm_legend(reverse = TRUE, show = TRUE,
+                                      title = "Aggregated \nAdjustment")) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_title("2.5th percentile") +
+  tmap_options(component.autoscale = TRUE)
+
+tmap_arrange(median_adj, lower_adj, upper_adj, ncol = 3)
+
+
+### areas with consistently high or low adjustment
+
+grid_agg_dat$adj_consistent <- case_when(grid_agg_dat$adj_low > 0 &
+                                           grid_agg_dat$adj_high > 0 ~ "underestimation",
+                                         grid_agg_dat$adj_low < 0 &
+                                           grid_agg_dat$adj_high < 0 ~ "overestimation")
+grid_agg_dat$adj_consistent <- ifelse(is.na(grid_agg_dat$adj_consistent),
+                                      "not consistent", grid_agg_dat$adj_consistent)
+table(grid_agg_dat$adj_consistent)
+
+tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(grid_agg_dat) +
+  tm_polygons(fill = "adj_median", lwd = 0,
+              tm_scale_continuous(values = c("royalblue1", 
+                                             "white", 
+                                             "orangered"),
+                                  limits = c(-43, 43),
+                                  midpoint = 0),
+              fill.legend = tm_legend(reverse = TRUE, show = FALSE,
+                                      title = "Aggregated \nAdjustment")) +
+  tm_shape(grid_agg_dat |>
+             filter(adj_consistent != "not consistent")) +
+  tm_polygons(fill = "adj_median", col = "black", lwd = 0.5,
+              tm_scale_continuous(values = c("royalblue1", 
+                                             "white", 
+                                             "orangered"),
+                                  limits = c(-43, 43),
+                                  midpoint = 0),
+              fill.legend = tm_legend(reverse = TRUE, show = FALSE,
+                                      title = "Aggregated \nAdjustment"))
+
+aggregate(grid_agg_dat$count, by = list(grid_agg_dat$adj_consistent), FUN = mean)
+# the grid cells with consistent results tend to have fewer than 4 
+aggregate(grid_agg_dat$count, by = list(grid_agg_dat$adj_consistent == "not consistent"), FUN = mean)
+# in fact, those without a consistent adjustment trend have an average of 7918 level-3 observations
+# those with a consistent adjustment trend have an average of 3.5 level-3 observations
+
+
+```
+
+
+
+
+### number of raw observations / L3 obs & raw observations / grid cell
+
+```{r}
+
+mob <- fread("data/mobile/mobile_o3_v5.csv")
+
+o3_mob <- merge(o3_df_clean, mob[, c("times", "LON",
+                               "LAT", "MOB")], 
+                by.x = c("date_time", "lon", "lat"),
+                by.y = c("times", "LON", "LAT"))
+
+# join to grid_shape, for join to fishnet
+head(o3_mob)
+head(grid_sf)
+
+o3_mob_shp <- merge(o3_mob, 
+                    st_drop_geometry(grid_sf[, c("date_time", "normalized_east",
+                                                 "normalized_north", "fishnet_id")]),
+                    by = c("date_time", "normalized_east", "normalized_north"))
+
+o3_mob_shp <- o3_mob_shp |>
+  merge(fishnet, by = "fishnet_id") |>
+  group_by(fishnet_id) |>
+  summarize(count = sum(MOB)) |>
+  # summarize(count = n()) |> # don't use this; get the actual full count of obs
+  ungroup()
+
+o3_mob_shp <- merge(fishnet, o3_mob_shp, by = "fishnet_id")
+
+mob_mon_map <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(st_as_sf(o3_mob_shp)) +
+  tm_polygons(fill = "count", lwd = 0,
+              tm_scale_intervals(values = "viridis",
+                                 n = 10, style = "quantile"),
+                                  # limits = c(-43, 43),
+                                  # midpoint = 0),
+              fill.legend = tm_legend(reverse = TRUE, show = FALSE, # change for single figure / panel
+                                      title = "Count of mobile\nobservations \n(deciles)")) +
+  tm_layout(frame = FALSE, legend.frame = FALSE)
+
+
+# make a panel with stationary monitor locations
+aqs_sites <- fread("data/aqs/aqs_o3_v5.csv") |>
+  distinct(site.num, .keep_all = TRUE) |>
+  st_as_sf(coords = c("longitude", "latitude"),
+           crs = 4326)
+
+fread("data/aqs/aqs_o3_v5.csv") |>
+  filter(day_time >= "2019-01-01") |>
+  distinct(day_time) |>
+  nrow()
+# 52588
+
+stat_mon_map <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(aqs_sites) +
+  tm_dots(size = 1, shape = 18, fill = "black",
+          fill.legend = tm_legend(reverse = TRUE)) +
+  tm_text(text = "site.num", size = 0.8, col = "black", xmod = 0.9, ymod = 0.1,
+          options = opt_tm_text(point.label.gap = 0,
+                                just = "left")) +
+  tm_layout(frame = FALSE, legend.frame = FALSE)
+
+tmap_arrange(stat_mon_map, mob_mon_map)
+
+# plotted together
+tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(st_as_sf(o3_mob_shp)) +
+  tm_polygons(fill = "count", lwd = 0,
+              tm_scale_intervals(values = "viridis",
+                                 n = 10, style = "quantile"),
+              # limits = c(-43, 43),
+              # midpoint = 0),
+              fill.legend = tm_legend(reverse = TRUE, show = TRUE,
+                                      # change for single figure / panel
+                                      title = "Count of mobile\nobservations \n(deciles)")) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_shape(aqs_sites) +
+  tm_dots(size = 0.75, shape = 18, fill = "red",
+          fill.legend = tm_legend(reverse = TRUE))
+
+
+```
+
+
+
+
 
 https://cran.r-project.org/web/packages/tableone/vignettes/introduction.html
 
 ```{r}
+ 
 
-library(tableone) ## maybe don't use table one
 
-# create variables of interest
-o3_df_clean <- o3_df_clean |>
-  mutate(month = lubridate::month(date_time, label = TRUE)) |>
-  mutate(day_of_week = lubridate::wday(date_time, week_start = 7)) |> #, # start week with Sunday
-                            #label = TRUE)) |>
-  mutate(hour = lubridate::hour(date_time)) |>
-  mutate(weekend = ifelse(day_of_week %in% c("Sunday", "Saturday"),
-                          "weekend", "weekday"))
 
-o3_df_clean <- o3_df_clean |>
-  mutate(season = case_when(o3_df_clean$date_time < "2023-03-20" ~ "Winter",
-                            o3_df_clean$date_time < "2023-06-21" ~ "Spring",
-                            o3_df_clean$date_time < "2023-09-22" ~ "Summer",
-                            o3_df_clean$date_time < "2023-12-21" ~ "Autumn",
-                            o3_df_clean$date_time >= "2023-12-21" ~ "Winter"))
+# summary(
+#   kruskal.test(adj ~ season, data = o3_df_clean)
+# )
+# 
+# aov_test <- kruskal.test(adj ~ season, data = o3_df_clean)
+# aov_test
+# 
+# TukeyHSD(aov(adj ~ as.factor(time_of_day), 
+#              data = o3_df_clean))
+# 
+# tukey.test <- TukeyHSD(aov(adj ~ as.factor(time_of_day), 
+#                            data = o3_df_clean))
+# tukey.test
 
-aggregate(o3_df_clean$adj, by = list(o3_df_clean$season), FUN = mean)
-aggregate(o3_df_clean$adj, by = list(o3_df_clean$season), FUN = sd)
-aggregate(o3_df_clean$adj, by = list(o3_df_clean$season), FUN = min)
-aggregate(o3_df_clean$adj, by = list(o3_df_clean$season), FUN = max)
-aggregate(o3_df_clean$adj, by = list(o3_df_clean$month), 
-          FUN = 'quantile', probs = c(0.025, 0.25, 0.5, 0.75, 0.975))
-
-summary(
-  aov(adj ~ season, data = o3_df_clean)
-)
 
 # CreateTableOne(vars = "adj", strata = c("month", "day_of_week", "hour", "weekend",
 #                                         "season"), data = o3_df_clean,
 #                testNonNormal = kruskal.test)
 
 
+aggregate(o3_df_clean$adj, by = list(o3_df_clean$month),
+          FUN = 'quantile', probs = c(0.025, 0.25, 0.5, 0.75, 0.975))
+
 ```
+
+### Plot and summarize adjustments by time of day
+### summarize adjustments across season
+
+```{r}
+
+
+# aggregate(o3_df_clean$val, by = list(o3_df_clean$))
+
+agg_time <- cbind(
+  aggregate(o3_df_clean$val, by = list(o3_df_clean$time_of_day), 
+            FUN = quantile, probs = c(0.05)) |>
+    dplyr::rename(time = Group.1,
+           low_O3 = x),
+  aggregate(o3_df_clean$val, by = list(o3_df_clean$time_of_day), 
+            FUN = quantile, probs = c(0.5)) |>
+    select(x) |>
+    dplyr::rename(median_O3 = x),
+  aggregate(o3_df_clean$val, by = list(o3_df_clean$time_of_day), 
+            FUN = quantile, probs = c(0.95)) |>
+    select(x) |>
+    dplyr::rename(high_O3 = x),
+  aggregate(o3_df_clean$yhat, by = list(o3_df_clean$time_of_day), 
+            FUN = quantile, probs = c(0.05)) |>
+    select(x) |>
+    dplyr::rename(low_O3_pred = x),
+  aggregate(o3_df_clean$yhat, by = list(o3_df_clean$time_of_day), 
+            FUN = quantile, probs = c(0.5)) |>
+    select(x) |>
+    dplyr::rename(median_O3_pred = x),
+  aggregate(o3_df_clean$yhat, by = list(o3_df_clean$time_of_day), 
+            FUN = quantile, probs = c(0.95)) |>
+    select(x) |>
+    dplyr::rename(high_O3_pred = x))
+
+agg_time_long <- agg_time |>
+  pivot_longer(cols = c("low_O3", "median_O3", "high_O3",
+                        "low_O3_pred", "median_O3_pred", "high_O3_pred"),
+               names_to = "variable")
+
+
+ggplot(agg_time_long, aes(x = time, y = value, group = variable)) +
+  geom_line(aes(colour = variable), lwd = 0.75, alpha = 0.9) +
+  scale_color_manual(values = c("orangered4", "orangered",
+                                "navy", "royalblue",
+                                #"maroon3", "violet",
+                                "gray20", "gray60")) +
+  scale_x_continuous(expand = c(0, 0), 
+                     breaks = seq(from = 0, to = 23, by = 2)) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 70)) +
+  xlab("Hour of Day") +
+  ylab("Ozone concentration (ppb)") +
+  theme_bw()
+
+
+
+## hourly boxplots of observed and predicted
+o3_df_clean |>
+  pivot_longer(cols = c("val", "yhat"), 
+               names_to = "o3_measure") |>
+  mutate(hour = as.factor(hour)) |>
+  ggplot(aes(x = hour, y = value, col = factor(o3_measure))) +
+  geom_boxplot(alpha = 0.2) +
+  # scale_colour_manual(values = c("slateblue4",
+  #                                "red")) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_colour_manual(values = c("lightseagreen",
+                                 "red")) +
+  scale_y_continuous(expand = c(0, 0))+#, limits = c(0, 175)) +
+  scale_x_discrete(expand = c(0, 0), 
+                   breaks = seq(from = 0, to = 23, by = 2)) +
+  xlab("Hour of Day") +
+  ylab("Ozone concentration (ppb)") +
+  theme_bw()
+
+## and the adjustments
+o3_df_clean |>
+  mutate(hour = as.factor(hour)) |>
+  ggplot(aes(x = hour, y = adj, col = as.factor(month))) +
+  geom_boxplot(alpha = 0.1) +
+  geom_boxplot(outlier.shape = NA) +
+  # scale_colour_manual(values = "black")
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_x_discrete(expand = c(0, 0), 
+                   breaks = seq(from = 0, to = 23, by = 2)) +
+  xlab("Hour of Day") +
+  ylab("Ozone concentration (ppb)") +
+  theme_bw()# +
+  # facet_wrap(~ month)
+
+
+
+
+```
+
 
 
 ```{r}
@@ -251,40 +874,6 @@ summary(o3_df_clean)
 ```
 
 
-## time series for full year
-
-```{r}
-
-o3_slc
-
-```
-
-
-## daily time series for month
-
-```{r}
-
-o3_slc |>
-  st_drop_geometry() |>
-  group_by(month(date_time), hour(date_time)) |>
-  median_qi(val, yhat, .width = 0.95) |>
-  rename(hour = `hour(date_time)`,
-         month = `month(date_time)`) |>
-  # filter(month == 10) |>
-  ggplot(aes(x = hour, y = val, ymin = val.lower, ymax = val.upper)) +
-  geom_line(colour = "red") +
-  geom_ribbon(aes(fill = "Mobile"), alpha = 0.5) +
-  geom_line(aes(x = hour, y = yhat), colour = "navy") +
-  geom_ribbon(aes(ymin = yhat.lower, ymax = yhat.upper,
-                  fill = "Stationary"),
-              alpha = 0.35) +
-  scale_fill_manual(labels = c("Mobile", "Stationary"), values = c("hotpink", "purple")) +
-  labs(x = "Hour of Day", y = "Adjustment (ppm)",
-       fill = "Data") +
-  facet_wrap(~ month, labeller = labeller(month = m_labels)) +
-  theme_minimal()
-
-```
 
 
 ## daily time series for seasons
@@ -312,9 +901,9 @@ o3_slc |>
 
 # get census geometry, population data
 
-v20 <- load_variables(2020, "dhc", cache = TRUE)
+# v20 <- load_variables(2020, "dhc", cache = TRUE)
 
-View(v20)
+# View(v20)
 
 slc_cnty <- get_decennial(geography = "block group",
                           variables = c('H6_001N'),
@@ -355,6 +944,47 @@ o3_slc_agg <- aggregate(o3_slc$adj, by = list(o3_slc$GEOID), FUN = quantile,
   select(!c(x))
 
 o3_slc_agg <- merge(slc_cnty, o3_slc_agg, by = "GEOID", all.x = TRUE)
+
+```
+
+## time series for full year
+
+```{r}
+
+# o3_slc
+
+```
+
+
+## daily time series for month
+
+```{r}
+
+library(tidybayes)
+
+m_labels <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+names(m_labels) <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+
+o3_slc |>
+  st_drop_geometry() |>
+  group_by(month(date_time), hour(date_time)) |>
+  median_qi(val, yhat, .width = 0.95) |>
+  rename(hour = `hour(date_time)`,
+         month = `month(date_time)`) |>
+  # filter(month == 10) |>
+  ggplot(aes(x = hour, y = val, ymin = val.lower, ymax = val.upper)) +
+  geom_line(colour = "red") +
+  geom_ribbon(aes(fill = "Mobile"), alpha = 0.5) +
+  geom_line(aes(x = hour, y = yhat), colour = "navy") +
+  geom_ribbon(aes(ymin = yhat.lower, ymax = yhat.upper,
+                  fill = "Stationary"),
+              alpha = 0.35) +
+  scale_fill_manual(labels = c("Mobile", "Stationary"), values = c("hotpink", "purple")) +
+  labs(x = "Hour of Day", y = "Adjustment (ppm)",
+       fill = "Data") +
+  facet_wrap(~ month, labeller = labeller(month = m_labels)) +
+  theme_minimal()
 
 ```
 
@@ -482,15 +1112,20 @@ n_obs <- o3_slc |>
   st_drop_geometry() |>
   count()
 
+```
+```{r}
 # weighting by n obs in a block group
 samp_idx <- sample(seq_len(nrow(n_obs)), 100, 
                    prob = n_obs$n)
+```
+```{r}
 # getting sampled block groups
 sampled_geoids <- n_obs[samp_idx, "GEOID"]
 # selecting observations in sampled block groups
 o3_slc_sample <- o3_slc[which(o3_slc$GEOID %in% sampled_geoids$GEOID), ]
 
-
+```
+```{r}
 # select just one; to walk through
 case_study <- o3_slc_sample |>
   filter(GEOID == 490351025012)
@@ -502,38 +1137,44 @@ case_study_long <- rbind(case_study[, c("date_time", "val", "GEOID")] |>
                          case_study[, c("date_time", "yhat", "GEOID")] |>
                            rename(measure = yhat) |>
                            mutate(stat = "yhat"))
-
+```
+```{r}
 ggplot(case_study_long, aes(x = date_time, 
                             y = measure, group = stat,
                             colour = stat)) +
   geom_line()
-
+```
+```{r}
 # time series by month
 val_by_month <- aggregate(case_study$val, by = list(hour(case_study$date_time),
-                                    month(case_study$date_time)), FUN = median) #|>
+                                    month(case_study$date_time)), FUN = median) |>
   # as.data.frame() |>
   filter(Group.2 == 10) |>
   ggplot(aes(x = Group.1, y = x)) +
   geom_line()
-
+```
+```{r}
 yhat_by_month <- aggregate(case_study$yhat, by = list(hour(case_study$date_time),
-                                    month(case_study$date_time)), FUN = median)# |>
+                                    month(case_study$date_time)), FUN = median) |>
   # as.data.frame() |>
   filter(Group.2 == 10) |>
   ggplot(aes(x = Group.1, y = x)) +
   geom_line()
-  
+```
+```{r}
   #
-val_by_month <- val_by_month |>
-  filter(Group.2 == 10)
-yhat_by_month <- yhat_by_month |>
-  filter(Group.2 == 10)
-
-ggplot(val_by_month, aes(x = Group.1, y = x)) +
-  geom_line() +
-  geom_line(data = yhat_by_month, colour = "red")
-
+# val_by_month <- val_by_month |>
+#   filter(Group.2 == 10)
+# yhat_by_month <- yhat_by_month |>
+#   filter(Group.2 == 10)
+# 
+# ggplot(val_by_month, aes(x = Group.1, y = x)) +
+#   geom_line() +
+#   geom_line(data = yhat_by_month, colour = "red")
+```
+```{r}
 library(ggdist)
+library(tidybayes)
 
 m_labels <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun",
               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
@@ -554,7 +1195,8 @@ case_study |>
   labs(x = "Adjustment (ppm)", y = "Hour of Day") +
   facet_wrap(~ month, labeller = labeller(month = m_labels)) +
   theme_minimal()
-
+```
+```{r}
 
 # geom_line(aes(y=y, x=x, colour = "sin"))+
 #       geom_ribbon(aes(ymin=lower, ymax=upper, x=x, fill = "band"), alpha = 0.3)+
@@ -597,19 +1239,6 @@ case_study |>
 
 
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 ## adjustments over time
@@ -798,12 +1427,41 @@ plot(o3_over_time$mean)
 
 ```
 
+```{r}
+
+slc_cnty #<- st_transform(slc_cnty, st_crs(out_sf))
+
+fishnet = slc_cnty %>%
+  st_make_grid(cellsize = 0.005, what = "polygons") %>% # make cell size 0.005 degrees, or ~500 m
+  st_as_sf() %>%
+  rename(geometry = x) %>%
+  mutate(fishnet_id = 1:n()) %>%
+  dplyr::select(fishnet_id, geometry)
+
+## assign points to grid cells
+# dat_sf <- st_as_sf(dat, coords = c("longitude", "latitude"), crs = 4326)
+
+fishnet <- st_transform(fishnet, crs = st_crs(o3_sf))
+
+grid_sf <- st_join(o3_sf, fishnet, join = st_intersects)
+
+```
+
 ## summary of observations
 
 Count
 
 ```{r}
+library(lubridate)
+# by hour of day
+grid_sf$time_mt <- with_tz(grid_sf$date_time, "America/Denver")
 
+grid_sf$time_of_day <- hour(grid_sf$time_mt)
+
+ggplot(grid_sf, aes(x = time_of_day)) +
+  geom_histogram(bins = 24)
+```
+```{r}
 # by year
 grid_sf$year <- year(grid_sf$time_mt)
 
@@ -811,32 +1469,36 @@ ggplot(grid_sf, aes(x = year)) +
   geom_histogram(stat = "count") +
   labs(x = "Year")
 
+```
+```{r}
 # by month
-grid_sf$month <- month(grid_sf$time_mt)
-grid_sf$month_label <- month(grid_sf$time_mt, label = TRUE)
-
+grid_sf$month <- lubridate::month(grid_sf$time_mt)
+grid_sf$month_label <- lubridate::month(grid_sf$time_mt, label = TRUE)
+```
+```{r}
 ggplot(grid_sf, aes(x = month_label)) +
   geom_histogram(stat = "count") +
   labs(x = "Month")
 
 # by day of week
-grid_sf$day_of_week <- wday(grid_sf$time)
-grid_sf$day_of_week_label <- wday(grid_sf$time, label = TRUE)
+grid_sf$day_of_week <- wday(grid_sf$time_mt)
+grid_sf$day_of_week_label <- lubridate::wday(grid_sf$time_mt, label = TRUE)
 
 grid_sf$day_type <- ifelse(grid_sf$day_of_week %in% c(1, 7), 
                            "weekend", "weekday")
-
+```
+```{r}
 ggplot(grid_sf, aes(x = day_of_week_label)) +
   geom_histogram(stat = "count") +
   labs(x = "Day of Week")
 
 # by hour of day
-grid_sf$time_mt <- with_tz(grid_sf$time, "America/Denver")
-
-grid_sf$time_of_day <- hour(grid_sf$time_mt)
-
-ggplot(grid_sf, aes(x = time_of_day)) +
-  geom_histogram(bins = 24)
+# grid_sf$time_mt <- with_tz(grid_sf$time_mt, "America/Denver")
+# 
+# grid_sf$time_of_day <- hour(grid_sf$time_mt)
+# 
+# ggplot(grid_sf, aes(x = time_of_day)) +
+#   geom_histogram(bins = 24)
 
 ```
 
@@ -879,10 +1541,10 @@ table(o3_df$val > 0.07)[1] / table(o3_df$val > 0.07)[2]
 
 ## range of over- / under-estimate
 summary(o3_df[which(o3_df$adj < 0), "val"])
-hist(o3_df[which(o3_df$adj < 0), "val"])
+# hist(o3_df[which(o3_df$adj < 0), "val"])
 # when o3 is better than expected, it's typically "off" by 24 ppb
 summary(o3_df[which(o3_df$adj > 0), "val"])
-hist(o3_df[which(o3_df$adj > 0), "val"])
+# hist(o3_df[which(o3_df$adj > 0), "val"])
 # when o3 is worse than expected, it's typically "off" by 35 ppb
 o3_under <- o3_df[which(o3_df$adj > 0), ] # getting all underestimates
 summary(o3_under$yhat)
@@ -932,10 +1594,13 @@ tmap_arrange(bad_day_val, bad_day_yhat)
 
 
 summary(o3_df[which(o3_df$adj < 0), "val"])
-hist(o3_df[which(o3_df$adj < 0), "val"])
+# hist(o3_df |>
+#        filter(o3_df$adj < 0) |>
+#        select("val") |>
+#        mutate(val = as.numeric(val)))
 
 summary(o3_df[which(o3_df$adj < 0), "yhat"])
-hist(o3_df[which(o3_df$adj < 0), "yhat"])
+# hist(o3_df[which(o3_df$adj < 0), "yhat"])
 
 summary(o3_df$yhat)
 summary(o3_df$val)
@@ -970,8 +1635,6 @@ ggplot(o3_df, aes(x = val, fill = "#E7298AFF")) +
 Get SL County geometry, grid cells
 
 ```{r}
-
-# slc_cnty = st_read("./data/SLC/Salt_lake.shp")
 
 slc_cnty <- st_read("/Users/brenna/Downloads/tl_2022_us_county/tl_2022_us_county.shp") |>
   filter(STATEFP == "49" & COUNTYFP == "035")
@@ -1066,6 +1729,81 @@ leaflet() |>
 
 ```
 
+
+
+
+
+```{r}
+
+cor.test(grid_sf$val, grid_sf$yhat)
+# correlated 88% of the time
+
+grid_corr <- grid_sf |>
+  st_drop_geometry() |>
+  group_by(hour) |>
+  summarise(correlation = cor(val, yhat),
+            count = n())
+
+summary(grid_corr$correlation)
+
+cor.test(grid_corr$correlation, grid_corr$count)
+
+plot(grid_corr$hour, grid_corr$count)
+
+grid_sf |>
+  st_drop_geometry() |>
+  group_by(hour) |>
+  summarise(correlation = cor(val, yhat)) |>
+  plot()
+
+
+cor.test(grid_sf$val, grid_sf$yhat)
+
+grid_cor <- grid_sf |>
+  st_drop_geometry() |>
+  merge(fishnet, by = "fishnet_id") |>
+  group_by(fishnet_id) |>
+  summarize(obs_mean = mean(val, na.rm = TRUE),
+            pred_mean = mean(yhat, na.rm = TRUE),
+            adj_mean = mean(adj, na.rm = TRUE),
+            obs_median = median(val, na.rm = TRUE),
+            pred_median = median(yhat, na.rm = TRUE),
+            adj_median = median(adj, na.rm = TRUE),
+            obs_high = quantile(val, 0.95, na.rm = TRUE),
+            pred_high = quantile(yhat, 0.95, na.rm = TRUE),
+            adj_high = quantile(adj, 0.95, na.rm = TRUE),
+            correlation = cor(val, yhat),
+            count = n()) %>%
+  ungroup() |>
+  as.data.frame()
+
+pal <- colorNumeric(
+  palette = "RdBu",
+  domain = c(-1, 1), reverse = FALSE)
+
+test <- grid_cor |>
+  filter(!is.na(correlation))
+
+leaflet() |>
+ setView(-111.86, 40.675, zoom = 10) |>
+ addProviderTiles(providers$CartoDB.Positron) |>
+ addPolygons(data = grid_dat, color = ~pal(grid_cor$correlation), fillOpacity = 0.9, stroke = FALSE) |>
+ addLegend('bottomright', pal = pal, values = grid_cor$correlation,
+           title = "Correlation between \n observed and predicted O3", na.label = "Too few observations")
+
+leaflet() |>
+  setView(-111.86, 40.675, zoom = 10) |>
+  addProviderTiles(providers$CartoDB.Positron) |>
+  addPolygons(data = grid_dat, color = ~pal(correlation), fillOpacity = 0.75, stroke = FALSE) |>
+  addLegend('bottomright', pal = pal, values = grid_cor$correlation,
+            title = "Median predicted value", na.label = "Too few observations")
+
+```
+
+
+
+
+
 Aggregating to grid cell-year-month
 
 ```{r}
@@ -1093,7 +1831,7 @@ grid_dat_ym <- merge(fishnet, grid_no_geom_ym, by = "fishnet_id")
 # observed median
 
 oct_20 <- grid_dat_ym |>
-  filter(year == 2020 &
+  filter(#year == 2020 &
            month == 10)
 
 # aggregate(grid_dat_ym$obs_median, by = list(grid_dat_ym$year, grid_dat_ym$month), FUN = median)
