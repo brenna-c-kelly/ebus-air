@@ -59,6 +59,8 @@ write.csv(o3.df, "data/aqs/aqs_o3_v5.csv", row.names = FALSE)
 test <- o3.df |>
   mutate(day_time = as.character(format(day_time)))
 head(test)
+
+
 #### preprocessing mobile data
 
 ### ebus
@@ -67,7 +69,7 @@ ebus_files <- paste0("data/mobile/ebus/", list.files("data/mobile/ebus/"))
 ebus_table <- lapply(ebus_files, read.csv, header = TRUE)
 
 ebus.df <- do.call(rbind, ebus_table) |>
-  select(c("times", "LAT", "LON", "ELV", "O3", "O3F")) # substitute with O3 O3F
+  select(c("times", "LAT", "LON", "ELV", "O3", "O3F", "MOB")) # substitute with O3 O3F
 
 ### trax
 trax_files <- paste0("data/mobile/trax/", list.files("data/mobile/trax"))
@@ -82,14 +84,14 @@ for(i in 1:68) {
 }
 
 trax.early <- do.call(rbind, trax_table[1:4]) |>
-  select(c("times", "LAT", "LON", "ELV", "O3", "O3F"))
+  select(c("times", "LAT", "LON", "ELV", "O3", "O3F", "MOB"))
 trax.mid <- do.call(rbind, trax_table[5]) |> # this guy doesn't have O3
-  select(c("times", "LAT", "LON", "ELV", "O3", "O3F"))
+  select(c("times", "LAT", "LON", "ELV", "O3", "O3F", "MOB"))
 trax_table <- do.call(rbind, trax_table[6:68]) |>
-  select(c("times", "LAT", "LON", "ELV", "O3", "O3F"))
+  select(c("times", "LAT", "LON", "ELV", "O3", "O3F", "MOB"))
 
 trax.df <- rbind(trax.early, 
-                 # trax.mid, # drop when getting gO3
+                 # trax.mid, # drop when getting O3
                  trax_table)
 
 
@@ -98,10 +100,10 @@ ebus.df$ebus_trax <- "ebus"
 trax.df$ebus_trax <- "trax"
 
 mobile <- rbind(ebus.df, trax.df)
-summary(ymd_hms(mobile$times))
+# summary(ymd_hms(mobile$times))
 head(mobile)
 
-# write.csv(mobile, "data/mobile/mobile_pm.csv", row.names = FALSE)
+#### write.csv(mobile, "data/mobile/mobile_pm.csv", row.names = FALSE)
 
 library(stringr)
 
@@ -131,11 +133,13 @@ mobile_clean$times <- ymd_hms(mobile_clean$times) - 7*60*60
 mobile_clean$times <- as.character(format(mobile_clean$times))
 
 # check that time is correct
-plot(aggregate(mobile_clean$O3, by = list(hour(mobile_clean$times)), FUN = mean))
+plot(aggregate(mobile_clean$O3, by = list(lubridate::hour(mobile_clean$times)), FUN = mean))
 
 # write.csv(mobile_clean, "data/mobile/mobile_o3_v3.csv", row.names = FALSE)
-write.csv(mobile_clean, "data/mobile/mobile_o3_v4.csv", row.names = FALSE)
+# write.csv(mobile_clean, "data/mobile/mobile_o3_v4.csv", row.names = FALSE)
+write.csv(mobile_clean, "data/mobile/mobile_o3_v5.csv", row.names = FALSE)
 # v3: with only last two weeks of 2019; no 2024 (apr 12 2025)
 # v4: 2018-2024, complete
+# v5: for paper only; to get n observations per level-3 observation
 
 

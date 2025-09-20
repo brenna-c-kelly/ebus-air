@@ -114,7 +114,7 @@ aggregate(o3_df_clean$yhat, by = list(o3_df_clean$val == 0), FUN = median)
 
 # day of week
 o3_df_clean$day_of_week <- wday(o3_df_clean$date_time)
-o3_df_clean$day_of_week_label <- wday(o3_df_clean$date_time, label = TRUE)
+o3_df_clean$day_of_week_label <- lubridate::wday(o3_df_clean$date_time, label = TRUE)
 # weekend
 o3_df_clean$day_type <- ifelse(o3_df_clean$day_of_week %in% c(1, 7), 
                            "weekend", "weekday")
@@ -183,6 +183,142 @@ summary(o3_df_clean$adj)
 ```
 
 The median adjustment is -1.46 (IQR [-5.44, 1.94]), meaning in a typical scenario in this dataset, the mobile observations overestimated O3 by about 1.5 ppb. Adjustment values also ranged from -80.7 to 144.8 — substantial over- and underestimates, respectively.
+
+
+```{r}
+
+# potential ones: 
+# "2024-07-16"
+# "2024-08-08"
+### "2020-08-08"
+## "2023-04-28"
+## "2023-02-08"
+### "2024-01-16"
+
+### July 5 > no afternoon, negative adjustments in south I-15
+### July 20 > little afternoon, negative adjustments in south I-15
+
+### looking for July, for Daniel
+sub_daily_jul <- o3_df_clean |>
+  filter(month == "Jul") |>
+  mutate(year = lubridate::year(date_time)) |>
+  filter(date == "2020-07-20") |>
+  filter(year == 2020) |>
+  # filter(date == "2023-04-28") |>
+  st_as_sf(coords = c("lon", "lat"), crs = st_crs(slc_cnty)) |>
+  mutate(morning_afternoon_evening = case_when(time_of_day %in% c(4:11) ~ "1morning",
+                                               time_of_day %in% c(12:18) ~ "2afternoon",
+                                               time_of_day %in% c(19, 20, 21, 22, 
+                                                                  23, 0, 1, 2, 3) ~ "3evening"))
+
+jul_20 <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(sub_daily_jul) +
+  tm_dots(fill = "adj", fill_alpha = 0.8, tm_scale_continuous(values = "-brewer.spectral",
+                                            midpoint = 0,
+                                            limits = c(-53.3, 53.3)),
+          fill.legend = tm_legend(show = FALSE)) +
+  tm_legend(reverse = TRUE) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_facets(by = c("morning_afternoon_evening"), rows = 1) +
+  tm_title("July 20, 2020")
+
+
+sub_daily_apr <- o3_df_clean |>
+  filter(date == "2023-04-28") |>
+  st_as_sf(coords = c("lon", "lat"), crs = st_crs(slc_cnty)) |>
+  mutate(morning_afternoon_evening = case_when(time_of_day %in% c(4:11) ~ "1morning",
+                                               time_of_day %in% c(12:18) ~ "2afternoon",
+                                               time_of_day %in% c(19, 20, 21, 22, 
+                                                                  23, 0, 1, 2, 3) ~ "3evening"))
+# show that it can be different depending on time of day (still visible without this)
+sub_daily_apr <- rbind(sub_daily_apr |>
+  filter(morning_afternoon_evening == "1morning") |>
+  arrange(-adj),
+  sub_daily_apr |>
+  filter(morning_afternoon_evening != "1morning") |>
+  arrange(adj))
+
+apr_28 <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(sub_daily_apr) +
+  tm_dots(fill = "adj", fill_alpha = 0.8, tm_scale_continuous(values = "-brewer.spectral",
+                                            midpoint = 0,
+                                            limits = c(-53.3, 53.3)),
+          fill.legend = tm_legend(show = FALSE)) +
+  tm_legend(reverse = TRUE) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_facets(by = c("morning_afternoon_evening"), rows = 1) +
+  tm_title("Apr 28, 2023")
+
+
+sub_daily_oct <- o3_df_clean |>
+  filter(date == "2022-10-04") |>
+  st_as_sf(coords = c("lon", "lat"), crs = st_crs(slc_cnty)) |>
+  mutate(morning_afternoon_evening = case_when(time_of_day %in% c(4:11) ~ "1morning",
+                                               time_of_day %in% c(12:18) ~ "2afternoon",
+                                               time_of_day %in% c(19, 20, 21, 22, 
+                                                                  23, 0, 1, 2, 3) ~ "3evening"))
+oct_4 <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(sub_daily_oct) +
+  tm_dots(fill = "adj", fill_alpha = 0.8, tm_scale_continuous(values = "-brewer.spectral",
+                                            midpoint = 0,
+                                            limits = c(-53.3, 53.3)),
+          fill.legend = tm_legend(show = FALSE)) +
+  tm_legend(reverse = TRUE) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_facets(by = c("morning_afternoon_evening"), rows = 1) +
+  tm_title("Oct 4, 2022")
+
+
+sub_daily_aug <- o3_df_clean |>
+  filter(date == "2020-08-08") |>
+  st_as_sf(coords = c("lon", "lat"), crs = st_crs(slc_cnty)) |>
+  mutate(morning_afternoon_evening = case_when(time_of_day %in% c(4:11) ~ "1morning",
+                                               time_of_day %in% c(12:18) ~ "2afternoon",
+                                               time_of_day %in% c(19, 20, 21, 22, 
+                                                                  23, 0, 1, 2, 3) ~ "3evening"))
+aug_8 <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(sub_daily_aug) +
+  tm_dots(fill = "adj", fill_alpha = 0.8, tm_scale_continuous(values = "-brewer.spectral",
+                                            midpoint = 0,
+                                            limits = c(-53.3, 53.3)),
+          fill.legend = tm_legend(show = FALSE)) +
+  tm_legend(reverse = TRUE) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_facets(by = c("morning_afternoon_evening"), rows = 1) +
+  tm_title("Aug 8, 2020")
+
+
+sub_daily_jan <- o3_df_clean |>
+  filter(date == "2024-01-16") |>
+  st_as_sf(coords = c("lon", "lat"), crs = st_crs(slc_cnty)) |>
+  mutate(morning_afternoon_evening = case_when(time_of_day %in% c(4:11) ~ "1morning",
+                                               time_of_day %in% c(12:18) ~ "2afternoon",
+                                               time_of_day %in% c(19, 20, 21, 22, 
+                                                                  23, 0, 1, 2, 3) ~ "3evening"))
+jan_16 <- tm_shape(slc_cnty) +
+  tm_borders(fill_alpha = 0) +
+  tm_shape(sub_daily_jan) +
+  tm_dots(fill = "adj", fill_alpha = 0.8, tm_scale_continuous(values = "-brewer.spectral",
+                                            midpoint = 0,
+                                            limits = c(-53.3, 53.3)),
+          fill.legend = tm_legend(show = FALSE)) +
+  tm_legend(reverse = TRUE) +
+  tm_layout(frame = FALSE, legend.frame = FALSE) +
+  tm_facets(by = c("morning_afternoon_evening"), rows = 1) +
+  tm_title("Jan 16, 2024")
+
+tmap_arrange(jul_20, oct_4, 
+             apr_28, jan_16,#aug_8, 
+             ncol = 4)
+
+jul_20
+
+```
+
 
 ###
 stop dicking around and make a map
@@ -745,24 +881,52 @@ o3_df_clean |>
   theme_bw()
 
 ## and the adjustments
-o3_df_clean |>
-  mutate(hour = as.factor(hour)) |>
-  ggplot(aes(x = hour, y = adj, col = as.factor(month))) +
+overall_boxplot <- o3_df_clean |>
+  mutate(hour = lubridate::hour(date_time),
+         hour = as.factor(hour)) |>
+  ggplot(aes(x = hour, y = adj)) +#, col = as.factor(month))) +
   geom_boxplot(alpha = 0.1) +
   geom_boxplot(outlier.shape = NA) +
-  # scale_colour_manual(values = "black")
+  scale_colour_manual(values = "black") +
   scale_y_continuous(expand = c(0, 0)) +
   scale_x_discrete(expand = c(0, 0), 
                    breaks = seq(from = 0, to = 23, by = 2)) +
   xlab("Hour of Day") +
-  ylab("Ozone concentration (ppb)") +
+  ylab("Adjustment (ppb)") +
+  ggtitle("Adjustment Distribution") +
   theme_bw()# +
   # facet_wrap(~ month)
 
+median_for_boxplot <- o3_df_clean |>
+  mutate(hour = lubridate::hour(date_time),
+         hour = as.factor(hour)) |>
+  group_by(hour) |>
+  summarize(median = median(adj)) |>
+  ggplot(aes(x = hour, y = median)) +
+  geom_point() +
+  # scale_y_continuous(expand = c(0, 0)) +
+  scale_x_discrete(expand = c(0, 0),
+                     breaks = seq(from = 0, to = 23, by = 2)) +
+  xlab("Hour of Day") +
+  ylab("Adjustment (ppb)") +
+  ggtitle("Median Adjustment") +
+  theme_bw()
+
+library(patchwork)
+
+median_for_boxplot / overall_boxplot +
+   plot_layout(heights = c(2, 5))
 
 
 
 ```
+
+
+
+```{r}
+
+```
+
 
 
 
