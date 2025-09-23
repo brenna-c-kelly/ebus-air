@@ -345,6 +345,8 @@ fishnet = slc_cnty %>%
   mutate(fishnet_id = 1:n()) %>%
   dplyr::select(fishnet_id, geometry)
 
+st_area(fishnet[1, ])
+
 ## assign points to grid cells
 fishnet <- st_transform(fishnet, crs = st_crs(o3_sf))
 # only grid cells located in salt lake county
